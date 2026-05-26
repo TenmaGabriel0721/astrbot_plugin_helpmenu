@@ -1,0 +1,65 @@
+{
+  "command_name": {
+    "description": "触发命令",
+    "type": "string",
+    "hint": "触发帮助菜单的命令，如 help 或 菜单",
+    "default": "help"
+  },
+  "header_title": {
+    "description": "菜单标题",
+    "type": "string",
+    "default": "月月菜单"
+  },
+  "header_subtitle": {
+    "description": "副标题",
+    "type": "string",
+    "default": "System Menu"
+  },
+  "logo_path": {
+    "description": "Logo图片路径",
+    "type": "string",
+    "hint": "显示在标题旁边的圆形Logo，留空则不显示。支持相对路径如 ./logo.jpg",
+    "default": "./logo.jpg"
+  },
+  "footer_text": {
+    "description": "页脚文字",
+    "type": "string",
+    "default": "[参数]必选 <参数>可选 | 请注意参数之间的空格"
+  },
+  "theme_color": {
+    "description": "主题色",
+    "type": "string",
+    "default": "#667eea",
+    "hint": "十六进制颜色代码，如 #667eea（蓝紫色）、#FF88AA（粉色）"
+  },
+  "use_api_background": {
+    "description": "使用API获取背景图",
+    "type": "bool",
+    "hint": "开启后将从API获取随机二次元背景图，关闭则使用本地图片",
+    "default": true
+  },
+  "background_api": {
+    "description": "背景图API地址",
+    "type": "string",
+    "hint": "返回图片的API地址，留空使用默认API",
+    "default": "http://manyacg.top/setu"
+  },
+  "background_image": {
+    "description": "本地背景图片路径",
+    "type": "string",
+    "hint": "当不使用API时，可以是单个图片或包含多张图片的文件夹（随机选择）",
+    "default": "./images"
+  },
+  "blur_radius": {
+    "description": "背景虚化程度",
+    "type": "int",
+    "hint": "背景图片的模糊程度(0-50)，0表示不模糊",
+    "default": 0
+  },
+  "card_opacity": {
+    "description": "卡片透明度",
+    "type": "int",
+    "hint": "命令卡片的不透明度(0-100)。数值越低越透明",
+    "default": 10
+  }
+}

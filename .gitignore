@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+cache/
+images/icons/*
+!images/icons/.gitkeep
+.DS_Store
