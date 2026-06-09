@@ -27,12 +27,6 @@
     "type": "string",
     "default": "System Menu"
   },
-  "logo_path": {
-    "description": "Logo图片路径",
-    "type": "string",
-    "hint": "显示在标题旁边的圆形Logo，留空则不显示。支持相对路径如 ./logo.png",
-    "default": "./logo.png"
-  },
   "footer_text": {
     "description": "页脚文字",
     "type": "string",

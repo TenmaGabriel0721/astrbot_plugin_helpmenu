@@ -20,6 +20,23 @@ const TEMPLATE = `
         <button @click="message = null" class="text-lg font-bold">&times;</button>
     </div>
 
+    <div class="border rounded-xl bg-gray-50 p-4 mb-6 flex flex-wrap items-center justify-between gap-4">
+        <div class="flex items-center gap-4 min-w-0">
+            <div class="w-20 h-20 rounded-full bg-white border flex items-center justify-center overflow-hidden text-3xl text-gray-400 flex-none">
+                <img v-if="headerLogo" :src="previewIcon(headerLogo)" class="w-full h-full object-cover" alt="顶部Logo" @error="resolveIcon(headerLogo)">
+                <span v-else>🤖</span>
+            </div>
+            <div>
+                <h2 class="text-lg font-bold text-gray-800">标题圆形 Logo</h2>
+                <p class="text-sm text-gray-500 mt-1">显示在帮助菜单标题旁边，上传后保存到持久化数据目录。</p>
+            </div>
+        </div>
+        <div class="flex items-center gap-2">
+            <button @click="uploadHeaderLogo" :disabled="uploading" class="px-3 py-2 bg-white border border-gray-300 rounded-md hover:bg-gray-50 transition text-gray-700 disabled:opacity-50">上传顶部Logo</button>
+            <button v-if="headerLogo" @click="clearHeaderLogo" :disabled="uploading" class="px-3 py-2 bg-gray-100 text-gray-600 rounded-md hover:bg-gray-200 transition disabled:opacity-50">清空Logo</button>
+        </div>
+    </div>
+
     <div v-if="categories.length === 0" class="text-center py-12 text-gray-400">暂无分类，请点击右上角“新建分类”开始创建吧！</div>
 
     <div v-else class="space-y-6">
@@ -84,6 +101,7 @@ createApp({
     template: TEMPLATE,
     setup() {
         const categories = ref([]);
+        const headerLogo = ref('');
         const saving = ref(false);
         const uploading = ref(false);
         const message = ref(null);
@@ -102,6 +120,7 @@ createApp({
                 bridge = window.AstrBotPluginPage;
                 if (!bridge) throw new Error('未检测到 Bridge 通信对象');
                 await bridge.ready();
+                await fetchSettings();
                 await fetchMenu();
             } catch (err) {
                 showMessage('通信初始化失败: ' + err.message, 'error');
@@ -193,6 +212,60 @@ createApp({
                 showMessage('Logo 上传成功，记得保存修改。');
             } catch (err) {
                 showMessage('上传失败: ' + err.message, 'error');
+            } finally {
+                uploading.value = false;
+            }
+        };
+
+        const fetchSettings = async () => {
+            try {
+                if (!bridge) return;
+                const result = await bridge.apiGet('settings');
+                const settings = result && result.data ? result.data : result;
+                headerLogo.value = (settings && settings.header_logo) || '';
+                if (headerLogo.value) await resolveIcon(headerLogo.value);
+            } catch (err) {
+                showMessage('加载页面设置失败: ' + err.message, 'error');
+            }
+        };
+
+        const uploadHeaderLogo = async () => {
+            if (!bridge || uploading.value) return;
+            const file = await chooseImage();
+            if (!file) return;
+            if (file.size > 5 * 1024 * 1024) {
+                showMessage('图片不能超过 5MB', 'error');
+                return;
+            }
+            uploading.value = true;
+            try {
+                const data = await readFileAsDataURL(file);
+                const result = await bridge.apiPost('settings/logo', { filename: file.name, data });
+                if (!result || !(result.success === true || result.success === 'true')) {
+                    throw new Error((result && (result.message || result.error)) || '上传响应错误');
+                }
+                headerLogo.value = result.path || '';
+                if (headerLogo.value) await resolveIcon(headerLogo.value);
+                showMessage('顶部 Logo 已保存。');
+            } catch (err) {
+                showMessage('上传顶部 Logo 失败: ' + err.message, 'error');
+            } finally {
+                uploading.value = false;
+            }
+        };
+
+        const clearHeaderLogo = async () => {
+            if (!bridge || uploading.value) return;
+            uploading.value = true;
+            try {
+                const result = await bridge.apiPost('settings/logo', { clear: true });
+                if (!result || !(result.success === true || result.success === 'true')) {
+                    throw new Error((result && (result.message || result.error)) || '保存响应错误');
+                }
+                headerLogo.value = '';
+                showMessage('顶部 Logo 已清空。');
+            } catch (err) {
+                showMessage('清空顶部 Logo 失败: ' + err.message, 'error');
             } finally {
                 uploading.value = false;
             }
@@ -321,12 +394,15 @@ createApp({
 
         return {
             categories,
+            headerLogo,
             saving,
             uploading,
             message,
             pendingDeleteIdx,
             previewIcon,
             resolveIcon,
+            uploadHeaderLogo,
+            clearHeaderLogo,
             uploadIcon,
             addCategory,
             deleteCategory,

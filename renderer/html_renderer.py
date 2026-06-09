@@ -334,7 +334,7 @@ class HtmlRenderer:
             background_url = self.get_random_background(bg_path)
         
         # 获取Logo
-        logo_path = config.get('logo_path', '')
+        logo_path = config.get('header_logo', '')
         logo_url = self.get_logo_base64(logo_path) if logo_path else None
 
         # 获取字体（动态嵌入到模板的 @font-face）

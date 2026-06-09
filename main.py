@@ -124,6 +124,7 @@ class HelpMenuPlugin(Star):
         self.plugin_dir = plugin_dir
         self.data_dir = StarTools.get_data_dir("astrbot_plugin_helpmenu")
         self.menu_json_path = self.data_dir / "menu.json"
+        self.settings_path = self.data_dir / "settings.json"
         self.icon_dir = self.data_dir / "images" / "icons"
         self.cache_dir = self.data_dir / "cache"
 
@@ -131,6 +132,7 @@ class HelpMenuPlugin(Star):
         self.cache_dir.mkdir(exist_ok=True)
         self.icon_dir.mkdir(parents=True, exist_ok=True)
         self._migrate_legacy_data()
+        self._migrate_legacy_logo_config()
 
         # 建立空菜单数据文件以防不存在
         if not self.menu_json_path.exists():
@@ -163,6 +165,18 @@ class HelpMenuPlugin(Star):
             self.api_resolve_icon,
             ["POST"],
             "解析帮助菜单Logo为可预览数据"
+        )
+        self.context.register_web_api(
+            "/astrbot_plugin_helpmenu/settings",
+            self.api_get_settings,
+            ["GET"],
+            "获取帮助菜单页面设置"
+        )
+        self.context.register_web_api(
+            "/astrbot_plugin_helpmenu/settings/logo",
+            self.api_save_header_logo,
+            ["POST"],
+            "保存帮助菜单顶部Logo"
         )
         HelpMenuCommandFilter.plugin = self
         logger.info(
@@ -222,6 +236,18 @@ class HelpMenuPlugin(Star):
                 except Exception as e:
                     logger.warning(f"迁移菜单图标失败 {source.name}: {e}")
 
+    def _migrate_legacy_logo_config(self):
+        """将旧配置中的 logo_path 迁移为 Native Page 管理的顶部 Logo。"""
+        settings = self._load_page_settings()
+        if settings.get("header_logo"):
+            return
+        legacy_logo = str(self.config.get("logo_path", "")).strip()
+        if not legacy_logo:
+            return
+        settings["header_logo"] = legacy_logo
+        if self._save_page_settings(settings):
+            logger.info("已将旧版 logo_path 迁移为页面管理的顶部 Logo")
+
     def _data_icon_to_legacy_path(self, icon_path: str) -> str:
         """将 data/plugin_data 中的图标路径转换为兼容 menu.json 的相对路径。"""
         try:
@@ -253,6 +279,61 @@ class HelpMenuPlugin(Star):
             logger.error(f"保存 menu.json 失败: {e}")
             return False
 
+    def _load_page_settings(self) -> Dict[str, Any]:
+        """读取通过 Native Page 管理的页面设置。"""
+        if not self.settings_path.exists():
+            return {"header_logo": ""}
+        try:
+            with open(self.settings_path, "r", encoding="utf-8-sig") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {"header_logo": ""}
+        except Exception as e:
+            logger.error(f"读取页面设置失败: {e}")
+            return {"header_logo": ""}
+
+    def _save_page_settings(self, data: Dict[str, Any]) -> bool:
+        """保存通过 Native Page 管理的页面设置。"""
+        try:
+            with open(self.settings_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            return True
+        except Exception as e:
+            logger.error(f"保存页面设置失败: {e}")
+            return False
+
+    async def api_get_settings(self):
+        """Quart API: 获取页面设置。"""
+        try:
+            settings = self._load_page_settings()
+            logo = str(settings.get("header_logo", "")).strip()
+            return jsonify({"success": True, "data": {"header_logo": logo}})
+        except Exception as e:
+            return jsonify({"success": False, "message": str(e)})
+
+    async def api_save_header_logo(self):
+        """Quart API: 上传或清空顶部圆形 Logo。"""
+        try:
+            payload = await request.get_json(silent=True) or {}
+            if payload.get("clear"):
+                settings = self._load_page_settings()
+                settings["header_logo"] = ""
+                if self._save_page_settings(settings):
+                    return jsonify({"success": True, "path": ""})
+                return jsonify({"success": False, "message": "保存页面设置失败"})
+
+            result = await self._save_uploaded_image("header_logo")
+            if not result.get("success"):
+                return jsonify(result)
+
+            settings = self._load_page_settings()
+            settings["header_logo"] = result["path"]
+            if not self._save_page_settings(settings):
+                return jsonify({"success": False, "message": "保存页面设置失败"})
+            return jsonify({"success": True, "path": result["path"]})
+        except Exception as e:
+            logger.error(f"保存顶部Logo失败: {e}")
+            return jsonify({"success": False, "message": str(e)})
+
     async def api_get_menu(self):
         """Quart API: 获取菜单"""
         try:
@@ -276,46 +357,50 @@ class HelpMenuPlugin(Star):
         except Exception as e:
             return jsonify({"success": False, "message": str(e)})
 
+    async def _save_uploaded_image(self, prefix: str = "icon") -> Dict[str, Any]:
+        """保存上传图片到持久化图标目录。"""
+        allowed_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+        max_size = 5 * 1024 * 1024
+        filename = "icon.png"
+        content = None
+
+        files = await request.files
+        upload = files.get("file") if files else None
+        if upload:
+            filename = upload.filename or filename
+            content = upload.read()
+        else:
+            payload = await request.get_json(silent=True)
+            if not isinstance(payload, dict):
+                return {"success": False, "message": "未收到图片文件"}
+            filename = payload.get("filename") or filename
+            data_url = payload.get("data") or ""
+            if "," in data_url:
+                data_url = data_url.split(",", 1)[1]
+            try:
+                content = base64.b64decode(data_url, validate=True)
+            except Exception:
+                return {"success": False, "message": "图片数据无效"}
+
+        ext = Path(filename).suffix.lower()
+        if ext not in allowed_exts:
+            return {"success": False, "message": "仅支持 png、jpg、jpeg、webp、gif 图片"}
+        if not content:
+            return {"success": False, "message": "图片内容为空"}
+        if len(content) > max_size:
+            return {"success": False, "message": "图片不能超过 5MB"}
+
+        safe_name = f"{prefix}_{uuid.uuid4().hex}{ext}"
+        target = self.icon_dir / safe_name
+        with open(target, "wb") as f:
+            f.write(content)
+
+        return {"success": True, "path": f"./images/icons/{safe_name}"}
+
     async def api_upload_icon(self):
         """Quart API: 上传分类或指令Logo"""
         try:
-            allowed_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
-            max_size = 5 * 1024 * 1024
-            filename = "icon.png"
-            content = None
-
-            files = await request.files
-            upload = files.get("file") if files else None
-            if upload:
-                filename = upload.filename or filename
-                content = upload.read()
-            else:
-                payload = await request.get_json(silent=True)
-                if not isinstance(payload, dict):
-                    return jsonify({"success": False, "message": "未收到图片文件"})
-                filename = payload.get("filename") or filename
-                data_url = payload.get("data") or ""
-                if "," in data_url:
-                    data_url = data_url.split(",", 1)[1]
-                try:
-                    content = base64.b64decode(data_url, validate=True)
-                except Exception:
-                    return jsonify({"success": False, "message": "图片数据无效"})
-
-            ext = Path(filename).suffix.lower()
-            if ext not in allowed_exts:
-                return jsonify({"success": False, "message": "仅支持 png、jpg、jpeg、webp、gif 图片"})
-            if not content:
-                return jsonify({"success": False, "message": "图片内容为空"})
-            if len(content) > max_size:
-                return jsonify({"success": False, "message": "图片不能超过 5MB"})
-
-            safe_name = f"{uuid.uuid4().hex}{ext}"
-            target = self.icon_dir / safe_name
-            with open(target, "wb") as f:
-                f.write(content)
-
-            return jsonify({"success": True, "path": f"./images/icons/{safe_name}"})
+            return jsonify(await self._save_uploaded_image("icon"))
         except Exception as e:
             logger.error(f"上传菜单Logo失败: {e}")
             return jsonify({"success": False, "message": str(e)})
@@ -445,7 +530,9 @@ class HelpMenuPlugin(Star):
                 filter_cat = message.strip() if message else None
             
             # 准备渲染数据（支持从API获取背景图）
-            data = await self.renderer.prepare_menu_data(categories, self.config, filter_cat)
+            render_config = dict(self.config)
+            render_config["header_logo"] = self._load_page_settings().get("header_logo", "")
+            data = await self.renderer.prepare_menu_data(categories, render_config, filter_cat)
             
             if filter_cat and not data['categories']:
                 yield event.plain_result(f"未找到分类：{filter_cat}")

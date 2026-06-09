@@ -74,8 +74,9 @@ sudo apt install fonts-noto-cjk fonts-noto-color-emoji
 2. 为分类上传 Logo。
 3. 新增、修改、删除指令。
 4. 修改指令描述。
-5. 为单条指令上传 Logo。
-6. 保存后写入 `data/plugin_data/astrbot_plugin_helpmenu/menu.json` 并即时生效。
+5. 上传或清空标题旁边的圆形 Logo。
+6. 为单条指令上传 Logo。
+7. 保存后写入 `data/plugin_data/astrbot_plugin_helpmenu/menu.json` 并即时生效。
 
 上传的图标默认保存在 AstrBot 持久化数据目录：
 
@@ -157,7 +158,6 @@ data/plugin_data/astrbot_plugin_helpmenu/menu.json
 | `command_aliases` | 帮助菜单触发别名，支持逗号、中文逗号、分号、竖线或换行分隔，修改后重载插件生效 | `菜单,帮助` |
 | `header_title` | 菜单标题 | `月月菜单` |
 | `header_subtitle` | 菜单副标题 | `System Menu` |
-| `logo_path` | 顶部 Logo 路径，留空则不显示 | `./logo.png` |
 | `footer_text` | 页脚提示文字 | `[参数]必选 <参数>可选 | 请注意参数之间的空格` |
 | `theme_color` | 菜单主题色 | `#667eea` |
 | `use_api_background` | 是否使用 API 获取背景图 | `true` |
@@ -188,7 +188,8 @@ astrbot_plugin_helpmenu/
 ```text
 AstrBot/data/plugin_data/astrbot_plugin_helpmenu/
 ├── menu.json               # 菜单数据
-└── images/icons/           # 后台上传的分类/指令图标
+├── settings.json           # 页面管理的顶部 Logo 等设置
+└── images/icons/           # 后台上传的分类/指令/顶部 Logo 图标
 ```
 
 ## 注意事项
