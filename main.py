@@ -4,6 +4,7 @@ AstrBot 图文帮助菜单插件
 添加 Native Page 可视化菜单面板，实现秒级修改保存即生效
 """
 
+import errno
 import re
 import os
 import json
@@ -15,8 +16,9 @@ from typing import Dict, Any, List
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.api import logger
-from astrbot.core.star.filter.custom_filter import CustomFilter
+from astrbot.core.star.filter.command import CommandFilter
 from astrbot.core.star.filter.permission import PermissionType
+from astrbot.core.star.star_handler import star_handlers_registry
 from quart import jsonify, request
 
 from .renderer import HtmlRenderer
@@ -60,31 +62,6 @@ class MenuParser:
             if keyword in text:
                 return emoji
         return '✨'  # 默认图标
-
-
-class HelpMenuCommandFilter(CustomFilter):
-    """按插件配置匹配帮助菜单触发命令和别名。"""
-
-    def filter(self, event: AstrMessageEvent, cfg) -> bool:
-        if not event.is_at_or_wake_command:
-            return False
-
-        plugin = getattr(self, "plugin", None)
-        if plugin is None:
-            return False
-
-        message_str = re.sub(r"\s+", " ", event.get_message_str().strip())
-        for command in plugin.get_configured_commands():
-            if message_str == command:
-                event.set_extra("helpmenu_message", None)
-                return True
-            if message_str.startswith(f"{command} "):
-                event.set_extra(
-                    "helpmenu_message",
-                    message_str[len(command):].strip() or None,
-                )
-                return True
-        return False
 
 
 @register("astrbot_plugin_helpmenu", "gabriel0721", "HTML渲染帮助菜单插件", "1.0.0")
@@ -156,7 +133,7 @@ class HelpMenuPlugin(Star):
             ["POST"],
             "保存帮助菜单顶部Logo"
         )
-        HelpMenuCommandFilter.plugin = self
+        self._apply_configured_command()
         logger.info(
             f"帮助菜单触发命令已设置为: {self.command_name}; "
             f"别名: {', '.join(sorted(self.command_aliases)) or '无'}"
@@ -184,6 +161,44 @@ class HelpMenuPlugin(Star):
                 result.append(command)
                 seen.add(command)
         return result
+
+    def _apply_configured_command(self) -> None:
+        """将配置中的主命令和别名同步到 AstrBot 框架指令过滤器。"""
+        commands = self.get_configured_commands()
+        if not commands:
+            logger.warning("帮助菜单触发命令为空，跳过指令同步")
+            return
+
+        for handler in star_handlers_registry.get_handlers_by_module_name(self.__module__):
+            if handler.handler_name != "menu_cmd":
+                continue
+            for event_filter in handler.event_filters:
+                if isinstance(event_filter, CommandFilter):
+                    event_filter.command_name = commands[0]
+                    event_filter._original_command_name = commands[0]
+                    event_filter.alias = set(commands[1:])
+                    event_filter._cmpl_cmd_names = None
+                    return
+        logger.warning("未找到帮助菜单框架指令过滤器，无法同步触发命令配置")
+
+    @staticmethod
+    def _clean_command_prefix(command: str) -> str:
+        """剥离菜单维护命令参数中可能携带的常见指令前缀。"""
+        command = str(command or "").strip()
+        return command[1:] if command.startswith(("~", "～", "/")) else command
+
+    @staticmethod
+    def _detect_image_ext(content: bytes) -> str:
+        """根据文件签名识别上传图片类型。"""
+        if content.startswith(b"\x89PNG\r\n\x1a\n"):
+            return ".png"
+        if content.startswith(b"\xff\xd8\xff"):
+            return ".jpg"
+        if content.startswith((b"GIF87a", b"GIF89a")):
+            return ".gif"
+        if len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP":
+            return ".webp"
+        return ""
 
     def _migrate_legacy_data(self):
         """将旧版本保存在插件目录中的可变数据迁移到 data/plugin_data。"""
@@ -253,8 +268,14 @@ class HelpMenuPlugin(Star):
             with open(self.menu_json_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             return True
-        except Exception as e:
-            logger.error(f"保存 menu.json 失败: {e}")
+        except PermissionError as e:
+            logger.error(f"保存 menu.json 失败，权限不足: {e}")
+            return False
+        except OSError as e:
+            if e.errno == errno.ENOSPC:
+                logger.error(f"保存 menu.json 失败，磁盘空间不足: {e}")
+            else:
+                logger.error(f"保存 menu.json 失败，文件系统错误: {e}")
             return False
 
     def _load_page_settings(self) -> Dict[str, Any]:
@@ -275,8 +296,14 @@ class HelpMenuPlugin(Star):
             with open(self.settings_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             return True
-        except Exception as e:
-            logger.error(f"保存页面设置失败: {e}")
+        except PermissionError as e:
+            logger.error(f"保存页面设置失败，权限不足: {e}")
+            return False
+        except OSError as e:
+            if e.errno == errno.ENOSPC:
+                logger.error(f"保存页面设置失败，磁盘空间不足: {e}")
+            else:
+                logger.error(f"保存页面设置失败，文件系统错误: {e}")
             return False
 
     async def api_get_settings(self):
@@ -337,21 +364,17 @@ class HelpMenuPlugin(Star):
 
     async def _save_uploaded_image(self, prefix: str = "icon") -> Dict[str, Any]:
         """保存上传图片到持久化图标目录。"""
-        allowed_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
         max_size = 5 * 1024 * 1024
-        filename = "icon.png"
         content = None
 
         files = await request.files
         upload = files.get("file") if files else None
         if upload:
-            filename = upload.filename or filename
             content = upload.read()
         else:
             payload = await request.get_json(silent=True)
             if not isinstance(payload, dict):
                 return {"success": False, "message": "未收到图片文件"}
-            filename = payload.get("filename") or filename
             data_url = payload.get("data") or ""
             if "," in data_url:
                 data_url = data_url.split(",", 1)[1]
@@ -360,13 +383,14 @@ class HelpMenuPlugin(Star):
             except Exception:
                 return {"success": False, "message": "图片数据无效"}
 
-        ext = Path(filename).suffix.lower()
-        if ext not in allowed_exts:
-            return {"success": False, "message": "仅支持 png、jpg、jpeg、webp、gif 图片"}
         if not content:
             return {"success": False, "message": "图片内容为空"}
         if len(content) > max_size:
             return {"success": False, "message": "图片不能超过 5MB"}
+
+        ext = self._detect_image_ext(content)
+        if not ext:
+            return {"success": False, "message": "图片文件签名无效，仅支持 png、jpg、webp、gif 图片"}
 
         safe_name = f"{prefix}_{uuid.uuid4().hex}{ext}"
         target = self.icon_dir / safe_name
@@ -480,7 +504,7 @@ class HelpMenuPlugin(Star):
 
         return categories
 
-    @filter.custom_filter(HelpMenuCommandFilter)
+    @filter.command("help")
     async def menu_cmd(self, event: AstrMessageEvent, message: str = None):
         """生成图文菜单。用法：~help [分类名]"""
         image_path = None
@@ -547,10 +571,7 @@ class HelpMenuPlugin(Star):
         """添加菜单项。用法：~添加菜单项 <分类名> <指令名> <描述>"""
         menu_data = self._load_menu_data()
         
-        # 剥离可能带的前缀，保持干净指令存储
-        clean_cmd = command
-        if clean_cmd.startswith("~") or clean_cmd.startswith("～") or clean_cmd.startswith("/"):
-            clean_cmd = clean_cmd[1:]
+        clean_cmd = self._clean_command_prefix(command)
             
         if category not in menu_data:
             menu_data[category] = {}
@@ -571,9 +592,7 @@ class HelpMenuPlugin(Star):
         """删除菜单项。用法：~删除菜单项 <指令名>"""
         menu_data = self._load_menu_data()
         
-        clean_cmd = command_to_delete
-        if clean_cmd.startswith("~") or clean_cmd.startswith("～") or clean_cmd.startswith("/"):
-            clean_cmd = clean_cmd[1:]
+        clean_cmd = self._clean_command_prefix(command_to_delete)
             
         found = False
         for category_name, cmd_map in list(menu_data.items()):

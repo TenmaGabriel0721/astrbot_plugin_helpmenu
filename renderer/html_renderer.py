@@ -3,10 +3,10 @@ HTML 渲染器模块
 使用 Playwright 本地渲染 HTML 为图片
 """
 
+import asyncio
 import os
 import base64
 import random
-import glob
 import tempfile
 import aiohttp
 from pathlib import Path
@@ -47,6 +47,9 @@ class HtmlRenderer:
 
         # HTTP会话
         self._session: Optional[aiohttp.ClientSession] = None
+        self._playwright = None
+        self._browser = None
+        self._browser_lock = asyncio.Lock()
     
     async def _get_session(self) -> aiohttp.ClientSession:
         """获取或创建HTTP会话"""
@@ -56,9 +59,62 @@ class HtmlRenderer:
         return self._session
     
     async def close(self):
-        """关闭HTTP会话"""
+        """关闭HTTP会话和浏览器资源"""
         if self._session and not self._session.closed:
             await self._session.close()
+        if self._browser:
+            await self._browser.close()
+            self._browser = None
+        if self._playwright:
+            await self._playwright.stop()
+            self._playwright = None
+
+    async def _get_browser(self):
+        """获取或启动可复用的 Playwright Chromium 浏览器。"""
+        async with self._browser_lock:
+            if self._browser and self._browser.is_connected():
+                return self._browser
+            from playwright.async_api import async_playwright
+            self._playwright = await async_playwright().start()
+            logger.debug("启动Playwright浏览器...")
+            self._browser = await self._playwright.chromium.launch(headless=True)
+            return self._browser
+
+    def _safe_relative_path(self, raw_path: str, base_dir: Path) -> Optional[Path]:
+        """解析相对路径，并确保结果仍在指定目录内。"""
+        if not raw_path or os.path.isabs(raw_path):
+            return None
+        candidate = (base_dir / raw_path.lstrip("./")).resolve()
+        try:
+            if candidate.is_relative_to(base_dir.resolve()):
+                return candidate
+        except ValueError:
+            pass
+        logger.warning(f"拒绝访问越界资源路径: {raw_path}")
+        return None
+
+    def _resolve_resource_path(self, raw_path: str, allow_plugin_fallback: bool = True) -> Optional[Path]:
+        """优先从持久化目录解析资源，必要时回退到插件内置资源。"""
+        if not raw_path:
+            return None
+        if os.path.isabs(raw_path):
+            path = Path(raw_path).resolve()
+            allowed_roots = [self.data_dir.resolve()]
+            if allow_plugin_fallback:
+                allowed_roots.append(self.plugin_dir.resolve())
+            if any(path.is_relative_to(root) for root in allowed_roots):
+                return path
+            logger.warning(f"拒绝访问越界绝对路径: {raw_path}")
+            return None
+
+        data_path = self._safe_relative_path(raw_path, self.data_dir)
+        if data_path and data_path.exists():
+            return data_path
+        if allow_plugin_fallback:
+            plugin_path = self._safe_relative_path(raw_path, self.plugin_dir)
+            if plugin_path:
+                return plugin_path
+        return data_path
     
     def load_template(self, template_name: str) -> str:
         """
@@ -134,35 +190,31 @@ class HtmlRenderer:
             bg_path = str(self.images_dir)
         
         # 如果是相对路径，优先从持久化数据目录读取，再回退到插件目录内置资源
-        if not os.path.isabs(bg_path):
-            rel_path = bg_path.lstrip('./')
-            data_path = self.data_dir / rel_path
-            plugin_path = self.plugin_dir / rel_path
-            if data_path.exists():
-                bg_path = str(data_path)
-            else:
-                bg_path = str(plugin_path)
-        
-        if not os.path.exists(bg_path):
+        resolved = self._resolve_resource_path(bg_path, allow_plugin_fallback=True)
+        if not resolved:
+            logger.warning(f"背景路径不存在或不允许访问: {bg_path}")
+            return None
+        bg_path = resolved
+
+        if not bg_path.exists():
             logger.warning(f"背景路径不存在: {bg_path}")
             return None
-        
+
         # 如果是文件，直接使用
-        if os.path.isfile(bg_path):
-            return self._encode_image(bg_path)
-        
+        if bg_path.is_file():
+            return self._encode_image(str(bg_path))
+
         # 如果是目录，随机选择一张图片
-        if os.path.isdir(bg_path):
-            image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.webp']
-            image_files = []
-            for ext in image_extensions:
-                image_files.extend(glob.glob(os.path.join(bg_path, ext)))
-                image_files.extend(glob.glob(os.path.join(bg_path, ext.upper())))
-            
+        if bg_path.is_dir():
+            image_files = [
+                path for path in bg_path.iterdir()
+                if path.is_file() and path.suffix.lower() in {'.jpg', '.jpeg', '.png', '.webp'}
+            ]
+
             if image_files:
                 selected = random.choice(image_files)
                 logger.info(f"随机选择本地背景图: {selected}")
-                return self._encode_image(selected)
+                return self._encode_image(str(selected))
         
         return None
     
@@ -211,20 +263,17 @@ class HtmlRenderer:
             return None
         
         # 如果是相对路径，优先从持久化数据目录读取，再回退到插件目录内置资源
-        if not os.path.isabs(logo_path):
-            rel_path = logo_path.lstrip('./')
-            data_path = self.data_dir / rel_path
-            plugin_path = self.plugin_dir / rel_path
-            if data_path.exists():
-                logo_path = str(data_path)
-            else:
-                logo_path = str(plugin_path)
-        
-        if not os.path.exists(logo_path):
+        resolved = self._resolve_resource_path(logo_path, allow_plugin_fallback=True)
+        if not resolved:
+            logger.warning(f"Logo文件不存在或不允许访问: {logo_path}")
+            return None
+        logo_path = resolved
+
+        if not logo_path.exists():
             logger.warning(f"Logo文件不存在: {logo_path}")
             return None
-        
-        return self._encode_image(logo_path)
+
+        return self._encode_image(str(logo_path))
 
     def get_font_data_url(self, font_path: Optional[str] = None) -> str:
         """
@@ -388,85 +437,82 @@ class HtmlRenderer:
         Returns:
             图片文件路径
         """
-        from playwright.async_api import async_playwright
-        
         temp_html_path = None
+        context = None
         try:
             # 创建安全的临时HTML文件，避免可预测文件名导致符号链接攻击
             fd, temp_html_path = tempfile.mkstemp(suffix=".html", prefix="helpmenu_", text=True)
             with os.fdopen(fd, 'w', encoding='utf-8') as f:
                 f.write(html_content)
-            
+
             if output_path is None:
                 output_path = temp_html_path.replace('.html', '.png')
-            
-            async with async_playwright() as p:
-                logger.debug("启动Playwright浏览器...")
-                browser = await p.chromium.launch(headless=True)
-                try:
-                    # 创建带有设备缩放的上下文，提高清晰度
-                    context = await browser.new_context(
-                        viewport={'width': 1360, 'height': 1280},
-                        device_scale_factor=scale  # 2倍分辨率
-                    )
-                    page = await context.new_page()
-                    
-                    # 加载HTML文件
-                    file_url = f"file://{pathname2url(temp_html_path)}"
-                    await page.goto(file_url, wait_until='networkidle')
-                    await page.wait_for_timeout(500)  # 等待渲染完成
-                    
-                    # 获取容器元素
-                    container = await page.query_selector('.container')
-                    if not container:
-                        # 如果没有container，截取整个页面
-                        await page.screenshot(path=output_path, full_page=True, type='png')
+
+            browser = await self._get_browser()
+            # 创建带有设备缩放的上下文，提高清晰度
+            context = await browser.new_context(
+                viewport={'width': 1360, 'height': 1280},
+                device_scale_factor=scale  # 2倍分辨率
+            )
+            page = await context.new_page()
+
+            # 加载HTML文件
+            file_url = f"file://{pathname2url(temp_html_path)}"
+            await page.goto(file_url, wait_until='networkidle')
+            await page.wait_for_timeout(500)  # 等待渲染完成
+
+            # 获取容器元素
+            container = await page.query_selector('.container')
+            if not container:
+                # 如果没有container，截取整个页面
+                await page.screenshot(path=output_path, full_page=True, type='png')
+            else:
+                # 获取容器的边界框
+                box = await container.bounding_box()
+                if box:
+                    # 设置viewport以匹配内容
+                    viewport_width = int(box['width']) + 48
+                    viewport_height = int(box['height']) + 48
+                    await page.set_viewport_size({
+                        'width': max(viewport_width, 1360),
+                        'height': max(viewport_height, 800)
+                    })
+
+                    # 重新获取边界框（viewport改变后可能变化）
+                    await page.wait_for_timeout(200)
+                    box = await container.bounding_box()
+
+                    if box:
+                        # 截取容器区域
+                        await page.screenshot(
+                            path=output_path,
+                            full_page=False,
+                            type='png',
+                            clip={
+                                'x': max(0, box['x'] - 12),
+                                'y': max(0, box['y'] - 12),
+                                'width': box['width'] + 24,
+                                'height': box['height'] + 24
+                            }
+                        )
                     else:
-                        # 获取容器的边界框
-                        box = await container.bounding_box()
-                        if box:
-                            # 设置viewport以匹配内容
-                            viewport_width = int(box['width']) + 48
-                            viewport_height = int(box['height']) + 48
-                            await page.set_viewport_size({
-                                'width': max(viewport_width, 1360),
-                                'height': max(viewport_height, 800)
-                            })
-                            
-                            # 重新获取边界框（viewport改变后可能变化）
-                            await page.wait_for_timeout(200)
-                            box = await container.bounding_box()
-                            
-                            if box:
-                                # 截取容器区域
-                                await page.screenshot(
-                                    path=output_path,
-                                    full_page=False,
-                                    type='png',
-                                    clip={
-                                        'x': max(0, box['x'] - 12),
-                                        'y': max(0, box['y'] - 12),
-                                        'width': box['width'] + 24,
-                                        'height': box['height'] + 24
-                                    }
-                                )
-                            else:
-                                await page.screenshot(path=output_path, full_page=True, type='png')
-                        else:
-                            await page.screenshot(path=output_path, full_page=True, type='png')
-                    
-                    await context.close()
-                    logger.info(f"菜单图片已生成: {output_path} (scale={scale}x)")
-                    return output_path
-                    
-                finally:
-                    await browser.close()
+                        await page.screenshot(path=output_path, full_page=True, type='png')
+                else:
+                    await page.screenshot(path=output_path, full_page=True, type='png')
+
+            logger.info(f"菜单图片已生成: {output_path} (scale={scale}x)")
+            return output_path
                     
         except Exception as e:
             logger.error(f"Playwright渲染失败: {e}")
             raise
         finally:
             # 清理临时HTML文件
+            if context:
+                try:
+                    await context.close()
+                except Exception as e:
+                    logger.warning(f"关闭Playwright上下文失败: {e}")
             if temp_html_path and os.path.exists(temp_html_path):
                 try:
                     os.remove(temp_html_path)
