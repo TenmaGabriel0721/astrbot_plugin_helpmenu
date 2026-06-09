@@ -25,18 +25,21 @@ class HtmlRenderer:
     # 默认字体文件名（相对 fonts/std/）
     DEFAULT_FONT_FILE = "东京街角的小浪漫.ttf"
 
-    def __init__(self, plugin_dir: str):
+    def __init__(self, plugin_dir: str, data_dir: str = None):
         """
         初始化渲染器
 
         Args:
             plugin_dir: 插件目录路径
+            data_dir: 插件持久化数据目录路径
         """
         self.plugin_dir = Path(plugin_dir)
+        self.data_dir = Path(data_dir) if data_dir else self.plugin_dir
         self.static_dir = self.plugin_dir / "static"
         self.html_dir = self.static_dir / "html"
         self.css_dir = self.static_dir / "css"
         self.images_dir = self.plugin_dir / "images"
+        self.data_images_dir = self.data_dir / "images"
         self.fonts_dir = self.plugin_dir / "fonts"
 
         # 字体 data URL 缓存：{绝对路径: data_url}
@@ -130,9 +133,15 @@ class HtmlRenderer:
         if not bg_path:
             bg_path = str(self.images_dir)
         
-        # 如果是相对路径，转换为绝对路径
+        # 如果是相对路径，优先从持久化数据目录读取，再回退到插件目录内置资源
         if not os.path.isabs(bg_path):
-            bg_path = str(self.plugin_dir / bg_path.lstrip('./'))
+            rel_path = bg_path.lstrip('./')
+            data_path = self.data_dir / rel_path
+            plugin_path = self.plugin_dir / rel_path
+            if data_path.exists():
+                bg_path = str(data_path)
+            else:
+                bg_path = str(plugin_path)
         
         if not os.path.exists(bg_path):
             logger.warning(f"背景路径不存在: {bg_path}")
@@ -201,9 +210,15 @@ class HtmlRenderer:
         if not logo_path:
             return None
         
-        # 如果是相对路径，转换为绝对路径
+        # 如果是相对路径，优先从持久化数据目录读取，再回退到插件目录内置资源
         if not os.path.isabs(logo_path):
-            logo_path = str(self.plugin_dir / logo_path.lstrip('./'))
+            rel_path = logo_path.lstrip('./')
+            data_path = self.data_dir / rel_path
+            plugin_path = self.plugin_dir / rel_path
+            if data_path.exists():
+                logo_path = str(data_path)
+            else:
+                logo_path = str(plugin_path)
         
         if not os.path.exists(logo_path):
             logger.warning(f"Logo文件不存在: {logo_path}")

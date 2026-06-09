@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Dict, Any, List
 
 from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.api import logger
 from astrbot.core.star.filter.permission import PermissionType
 from quart import jsonify, request
@@ -94,18 +94,22 @@ class HelpMenuPlugin(Star):
         
         plugin_dir = Path(__file__).parent
         self.plugin_dir = plugin_dir
-        self.menu_json_path = plugin_dir / "menu.json"
-        
-        # 建立空配置缓存以防不存在
+        self.data_dir = StarTools.get_data_dir("astrbot_plugin_helpmenu")
+        self.menu_json_path = self.data_dir / "menu.json"
+        self.icon_dir = self.data_dir / "images" / "icons"
+        self.cache_dir = self.data_dir / "cache"
+
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.cache_dir.mkdir(exist_ok=True)
+        self.icon_dir.mkdir(parents=True, exist_ok=True)
+        self._migrate_legacy_data()
+
+        # 建立空菜单数据文件以防不存在
         if not self.menu_json_path.exists():
             with open(self.menu_json_path, "w", encoding="utf-8") as f:
                 json.dump({}, f, ensure_ascii=False, indent=2)
-                
-        self.cache_dir = plugin_dir / "cache"
-        self.cache_dir.mkdir(exist_ok=True)
-        self.icon_dir = plugin_dir / "images" / "icons"
-        self.icon_dir.mkdir(parents=True, exist_ok=True)
-        self.renderer = HtmlRenderer(str(plugin_dir))
+
+        self.renderer = HtmlRenderer(str(plugin_dir), str(self.data_dir))
         
         # 注册 Quart 页面端点 API (提供给 WebUI Page 编辑器)
         self.context.register_web_api(
@@ -134,6 +138,45 @@ class HelpMenuPlugin(Star):
         )
         
         logger.info("帮助菜单插件增强版已加载 (支持 Native Page 可视化编辑 & 无感重载)")
+
+    def _migrate_legacy_data(self):
+        """将旧版本保存在插件目录中的可变数据迁移到 data/plugin_data。"""
+        legacy_menu = self.plugin_dir / "menu.json"
+        default_menu = self.plugin_dir / "default_menu.json"
+        if not self.menu_json_path.exists():
+            source_menu = legacy_menu if legacy_menu.exists() else default_menu
+            if source_menu.exists():
+                try:
+                    with open(source_menu, "r", encoding="utf-8-sig") as f:
+                        menu_data = json.load(f)
+                    with open(self.menu_json_path, "w", encoding="utf-8") as f:
+                        json.dump(menu_data, f, ensure_ascii=False, indent=2)
+                    logger.info(f"已初始化帮助菜单数据到: {self.menu_json_path}")
+                except Exception as e:
+                    logger.error(f"初始化帮助菜单数据失败: {e}")
+
+        legacy_icon_dir = self.plugin_dir / "images" / "icons"
+        if legacy_icon_dir.exists():
+            for source in legacy_icon_dir.iterdir():
+                if source.name == ".gitkeep" or not source.is_file():
+                    continue
+                target = self.icon_dir / source.name
+                if target.exists():
+                    continue
+                try:
+                    target.write_bytes(source.read_bytes())
+                except Exception as e:
+                    logger.warning(f"迁移菜单图标失败 {source.name}: {e}")
+
+    def _data_icon_to_legacy_path(self, icon_path: str) -> str:
+        """将 data/plugin_data 中的图标路径转换为兼容 menu.json 的相对路径。"""
+        try:
+            path = Path(icon_path)
+            if path.is_absolute() and path.is_relative_to(self.icon_dir):
+                return f"./images/icons/{path.name}"
+        except Exception:
+            pass
+        return icon_path
 
     def _load_menu_data(self) -> Dict[str, Dict[str, str]]:
         """从 menu.json 实时加载当前菜单配置"""

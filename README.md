@@ -1,6 +1,6 @@
 # AstrBot 帮助菜单
 
-一个用于 AstrBot 的图文帮助菜单插件。插件会读取 `menu.json` 中的分类与指令配置，将帮助菜单渲染为图片发送；同时提供 AstrBot Native Page 后台管理页面，方便直接编辑分类、指令说明和 Logo。
+一个用于 AstrBot 的图文帮助菜单插件。插件会读取持久化数据目录中的 `menu.json` 分类与指令配置，将帮助菜单渲染为图片发送；同时提供 AstrBot Native Page 后台管理页面，方便直接编辑分类、指令说明和 Logo。
 
 ## 功能特性
 
@@ -73,12 +73,18 @@ sudo apt install fonts-noto-cjk fonts-noto-color-emoji
 3. 新增、修改、删除指令。
 4. 修改指令描述。
 5. 为单条指令上传 Logo。
-6. 保存后写入 `menu.json` 并即时生效。
+6. 保存后写入 `data/plugin_data/astrbot_plugin_helpmenu/menu.json` 并即时生效。
 
-上传的图标默认保存在：
+上传的图标默认保存在 AstrBot 持久化数据目录：
 
 ```text
-images/icons/
+data/plugin_data/astrbot_plugin_helpmenu/images/icons/
+```
+
+菜单数据默认保存在：
+
+```text
+data/plugin_data/astrbot_plugin_helpmenu/menu.json
 ```
 
 ## 菜单数据格式
@@ -148,7 +154,7 @@ images/icons/
 | `command_name` | 帮助菜单触发命令 | `help` |
 | `header_title` | 菜单标题 | `月月菜单` |
 | `header_subtitle` | 菜单副标题 | `System Menu` |
-| `logo_path` | 顶部 Logo 路径，留空则不显示 | `./logo.jpg` |
+| `logo_path` | 顶部 Logo 路径，留空则不显示 | `./logo.png` |
 | `footer_text` | 页脚提示文字 | `[参数]必选 <参数>可选 | 请注意参数之间的空格` |
 | `theme_color` | 菜单主题色 | `#667eea` |
 | `use_api_background` | 是否使用 API 获取背景图 | `true` |
@@ -165,13 +171,21 @@ astrbot_plugin_helpmenu/
 ├── main.py                 # 插件入口
 ├── metadata.yaml           # AstrBot 插件元数据
 ├── _conf_schema.json       # WebUI 配置项定义
-├── menu.json               # 菜单数据
 ├── requirements.txt        # Python 依赖
+├── default_menu.json       # 首次启动时使用的默认菜单模板
 ├── logo.png                # 插件 Logo
 ├── renderer/               # HTML 渲染逻辑
 ├── static/html/menu.html   # 菜单 HTML 模板
 ├── pages/manage/           # Native Page 管理页面
-└── images/                 # 默认背景和上传图标目录
+└── images/                 # 内置默认背景资源
+```
+
+可变数据不会保存在插件目录内，默认位于：
+
+```text
+AstrBot/data/plugin_data/astrbot_plugin_helpmenu/
+├── menu.json               # 菜单数据
+└── images/icons/           # 后台上传的分类/指令图标
 ```
 
 ## 注意事项
@@ -179,7 +193,7 @@ astrbot_plugin_helpmenu/
 - 本插件版本号已按发布规范标记为 `1.0.0`。
 - 插件 Logo 文件建议使用 1:1 比例，推荐尺寸 256×256。
 - 上传图标支持 `png`、`jpg`、`jpeg`、`webp`、`gif`，单个文件最大 5MB。
-- `menu.json` 会被后台管理页面直接写入，请在更新插件前自行备份重要菜单数据。
+- `menu.json` 和后台上传的图标保存在 `data/plugin_data/astrbot_plugin_helpmenu/`，更新或重装插件时请保留该目录。
 - 如果修改插件代码、页面或模板后未生效，请在 AstrBot WebUI 中重载插件，必要时重启 AstrBot。
 
 ## 开源协议
