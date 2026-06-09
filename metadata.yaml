@@ -1,5 +1,5 @@
 name: astrbot_plugin_helpmenu
-display_name: 帮助菜单
+display_name: 自定义帮助菜单
 short_desc: 使用图片展示 AstrBot 指令帮助菜单，支持后台可视化编辑。
 desc: 一个 AstrBot 图文帮助菜单插件，可将 menu.json 中的分类与指令渲染为图片，并提供 Native Page 后台页面用于维护菜单内容、分类 Logo 和指令 Logo。
 help: 发送 /help 查看完整图文菜单；发送 /help 分类名 查看指定分类；管理员可使用 /添加菜单项 和 /删除菜单项 快速维护菜单。
