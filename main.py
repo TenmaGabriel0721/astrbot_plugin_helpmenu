@@ -98,28 +98,6 @@ class HelpMenuPlugin(Star):
         self.command_aliases = self._parse_command_aliases(config.get('command_aliases', '菜单,帮助'))
         self.command_prefix = config.get('command_prefix', '')
         
-        # 内存幽灵插件元数据自愈净化：在完全载入后，彻底移除多余同名幽灵，保留唯一的正统卡片
-        try:
-            from astrbot.core.star.star_manager import star_registry
-            correct_star = None
-            ghost_stars = []
-            
-            for s in star_registry:
-                if s.name == "astrbot_plugin_helpmenu":
-                    if getattr(s, "module_path", "").startswith("data.plugins."):
-                        correct_star = s
-                    else:
-                        ghost_stars.append(s)
-            
-            # 如果两个都有，把没有 data.plugins 前缀的幽灵卡片彻底从注册表中移除
-            if correct_star and ghost_stars:
-                for ghost in ghost_stars:
-                    if ghost in star_registry:
-                        star_registry.remove(ghost)
-                logger.info("✨ 成功净化清除多余的同名幽灵卡片，只保留唯一正统的帮助菜单卡片！")
-        except Exception as cleanup_err:
-            logger.error(f"净化幽灵卡片失败: {cleanup_err}")
-        
         plugin_dir = Path(__file__).parent
         self.plugin_dir = plugin_dir
         self.data_dir = StarTools.get_data_dir("astrbot_plugin_helpmenu")
@@ -552,9 +530,7 @@ class HelpMenuPlugin(Star):
             logger.error(f"模板文件不存在: {e}")
             yield event.plain_result("❌ 菜单模板文件不存在，请检查插件安装是否完整")
         except Exception as e:
-            logger.error(f"生成菜单失败: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception(f"生成菜单失败: {e}")
             yield event.plain_result(f"❌ 生成菜单出错: {str(e)}")
         finally:
             # 清理临时图片文件

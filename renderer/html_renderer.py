@@ -392,13 +392,9 @@ class HtmlRenderer:
         
         temp_html_path = None
         try:
-            # 创建临时HTML文件
-            temp_dir = tempfile.gettempdir()
-            temp_html_path = os.path.join(
-                temp_dir,
-                f"helpmenu_{os.getpid()}_{hash(html_content) % 100000}.html"
-            )
-            with open(temp_html_path, 'w', encoding='utf-8') as f:
+            # 创建安全的临时HTML文件，避免可预测文件名导致符号链接攻击
+            fd, temp_html_path = tempfile.mkstemp(suffix=".html", prefix="helpmenu_", text=True)
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
                 f.write(html_content)
             
             if output_path is None:
