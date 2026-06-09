@@ -36,9 +36,14 @@ const TEMPLATE = `
                         <button v-if="cat.icon" @click="cat.icon = ''" class="px-2.5 py-1.5 bg-gray-100 text-gray-600 rounded-md hover:bg-gray-200 transition">清空Logo</button>
                     </div>
                 </div>
-                <div class="space-x-2">
+                <div class="flex items-center gap-2">
+                    <div class="flex items-center bg-white border border-gray-300 rounded-md overflow-hidden">
+                        <button @click="moveCategory(catIdx, -1)" :disabled="catIdx === 0" title="上移分类" class="px-2 py-1.5 text-gray-600 hover:bg-gray-50 disabled:opacity-30 disabled:cursor-not-allowed transition">↑</button>
+                        <span class="w-px h-5 bg-gray-200"></span>
+                        <button @click="moveCategory(catIdx, 1)" :disabled="catIdx === categories.length - 1" title="下移分类" class="px-2 py-1.5 text-gray-600 hover:bg-gray-50 disabled:opacity-30 disabled:cursor-not-allowed transition">↓</button>
+                    </div>
                     <button @click="addCommand(catIdx)" class="text-sm px-2.5 py-1.5 bg-white border border-gray-300 rounded-md hover:bg-gray-50 transition text-gray-700">+ 添加指令</button>
-                    <button @click="deleteCategory(catIdx)" class="text-sm px-2.5 py-1.5 bg-red-50 text-red-600 rounded-md hover:bg-red-100 transition">删除分类</button>
+                    <button @click="deleteCategory(catIdx)" :class="pendingDeleteIdx === catIdx ? 'bg-red-600 text-white hover:bg-red-700' : 'bg-red-50 text-red-600 hover:bg-red-100'" class="text-sm px-2.5 py-1.5 rounded-md transition" v-text="pendingDeleteIdx === catIdx ? '再次点击确认' : '删除分类'"></button>
                 </div>
             </div>
 
@@ -51,7 +56,7 @@ const TEMPLATE = `
                     </div>
                     <div class="w-56 max-w-full">
                         <div class="flex items-center bg-gray-100 rounded px-2">
-                            <span class="text-gray-400 font-mono text-sm mr-1">~</span>
+                            <input type="text" v-model="cmd.prefix" class="bg-transparent py-1.5 w-8 outline-none font-mono text-sm text-gray-600 text-center" placeholder="~" title="前缀（留空=自动，输入空格=无前缀）">
                             <input type="text" v-model="cmd.name" class="bg-transparent py-1.5 w-full outline-none font-medium text-sm text-gray-800" placeholder="指令名">
                         </div>
                     </div>
@@ -59,6 +64,11 @@ const TEMPLATE = `
                         <input type="text" v-model="cmd.desc" class="w-full border border-gray-200 rounded px-3 py-1.5 text-sm text-gray-600 focus:border-blue-500 focus:outline-none" placeholder="输入指令功能说明描述...">
                     </div>
                     <div class="flex items-center gap-2 flex-none">
+                        <div class="flex items-center bg-white border border-gray-300 rounded-md overflow-hidden">
+                            <button @click="moveCommand(catIdx, cmdIdx, -1)" :disabled="cmdIdx === 0" title="上移指令" class="px-2 py-1 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-30 disabled:cursor-not-allowed transition">↑</button>
+                            <span class="w-px h-4 bg-gray-200"></span>
+                            <button @click="moveCommand(catIdx, cmdIdx, 1)" :disabled="cmdIdx === cat.commands.length - 1" title="下移指令" class="px-2 py-1 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-30 disabled:cursor-not-allowed transition">↓</button>
+                        </div>
                         <button @click="uploadIcon('command', catIdx, cmdIdx)" :disabled="uploading" class="text-xs px-2.5 py-1.5 bg-white border border-gray-300 rounded-md hover:bg-gray-50 transition text-gray-700 disabled:opacity-50">上传Logo</button>
                         <button v-if="cmd.icon" @click="cmd.icon = ''" class="text-xs px-2.5 py-1.5 bg-gray-100 text-gray-600 rounded-md hover:bg-gray-200 transition">清空</button>
                         <button @click="deleteCommand(catIdx, cmdIdx)" class="text-gray-400 hover:text-red-500 transition text-xl px-2">&times;</button>
@@ -77,8 +87,10 @@ createApp({
         const saving = ref(false);
         const uploading = ref(false);
         const message = ref(null);
+        const pendingDeleteIdx = ref(-1);
         let bridge = null;
         const iconPreviewCache = ref({});
+        const resolvingIcons = new Set();
 
         const showMessage = (text, type = 'success') => {
             message.value = { text, type };
@@ -86,11 +98,6 @@ createApp({
         };
 
         const initBridge = async () => {
-            let retries = 0;
-            while (!window.AstrBotPluginPage && retries < 100) {
-                await new Promise(resolve => setTimeout(resolve, 50));
-                retries++;
-            }
             try {
                 bridge = window.AstrBotPluginPage;
                 if (!bridge) throw new Error('未检测到 Bridge 通信对象');
@@ -111,8 +118,9 @@ createApp({
         };
 
         const resolveIcon = async (icon) => {
-            if (!bridge || !icon || iconPreviewCache.value[icon]) return;
+            if (!bridge || !icon || iconPreviewCache.value[icon] || resolvingIcons.has(icon)) return;
             if (icon.startsWith('data:') || icon.startsWith('http://') || icon.startsWith('https://')) return;
+            resolvingIcons.add(icon);
             try {
                 const result = await bridge.apiPost('icon/resolve', { icon });
                 if (result && (result.success === true || result.success === 'true') && result.url) {
@@ -120,6 +128,8 @@ createApp({
                 }
             } catch (err) {
                 console.warn('Logo 预览解析失败:', err);
+            } finally {
+                resolvingIcons.delete(icon);
             }
         };
 
@@ -138,8 +148,25 @@ createApp({
             const input = document.createElement('input');
             input.type = 'file';
             input.accept = 'image/png,image/jpeg,image/webp,image/gif';
-            input.onchange = () => resolve(input.files && input.files[0] ? input.files[0] : null);
+            input.style.display = 'none';
+            const cleanup = () => {
+                input.onchange = null;
+                input.remove();
+            };
+            input.onchange = () => {
+                const file = input.files && input.files[0] ? input.files[0] : null;
+                cleanup();
+                resolve(file);
+            };
+            document.body.appendChild(input);
             input.click();
+        });
+
+        const readFileAsDataURL = (file) => new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = () => reject(reader.error || new Error('读取图片失败'));
+            reader.readAsDataURL(file);
         });
 
         const uploadIcon = async (type, catIdx, cmdIdx = null) => {
@@ -152,7 +179,8 @@ createApp({
             }
             uploading.value = true;
             try {
-                const result = await bridge.upload('icon', file);
+                const data = await readFileAsDataURL(file);
+                const result = await bridge.apiPost('icon', { filename: file.name, data });
                 if (!result || !(result.success === true || result.success === 'true') || !result.path) {
                     throw new Error((result && (result.message || result.error)) || '上传响应错误');
                 }
@@ -183,18 +211,20 @@ createApp({
                         if (cmdName === '__icon__') continue;
                         let desc = '';
                         let icon = '';
+                        let prefix = undefined;  // undefined 表示使用默认逻辑
                         if (cmdInfo && typeof cmdInfo === 'object') {
                             desc = cmdInfo.desc || '';
                             icon = cmdInfo.icon || '';
+                            prefix = cmdInfo.prefix !== undefined ? cmdInfo.prefix : undefined;
                         } else {
                             desc = String(cmdInfo || '');
                         }
-                        commands.push({ name: cmdName, desc, icon });
+                        commands.push({ name: cmdName, desc, icon, prefix });
                     }
                     list.push({ name: catName, icon: catIcon, commands });
                 }
                 categories.value = list;
-                await resolveMenuIcons();
+                resolveMenuIcons();
             } catch (err) {
                 showMessage('加载数据失败: ' + err.message, 'error');
             }
@@ -205,17 +235,44 @@ createApp({
         };
 
         const deleteCategory = (idx) => {
-            if (confirm(`确定要删除分类 "${categories.value[idx].name}" 吗？`)) {
+            const cat = categories.value[idx];
+            if (!cat) return;
+            if (pendingDeleteIdx.value === idx) {
                 categories.value.splice(idx, 1);
+                pendingDeleteIdx.value = -1;
+                return;
             }
+            pendingDeleteIdx.value = idx;
+            showMessage(`再次点击「删除分类」以确认删除 "${cat.name}"`, 'error');
+            setTimeout(() => {
+                if (pendingDeleteIdx.value === idx) pendingDeleteIdx.value = -1;
+            }, 5000);
         };
 
         const addCommand = (catIdx) => {
-            categories.value[catIdx].commands.push({ name: '', desc: '', icon: '' });
+            categories.value[catIdx].commands.push({ name: '', desc: '', icon: '', prefix: undefined });
         };
 
         const deleteCommand = (catIdx, cmdIdx) => {
             categories.value[catIdx].commands.splice(cmdIdx, 1);
+        };
+
+        const moveCategory = (idx, delta) => {
+            const target = idx + delta;
+            const list = categories.value;
+            if (target < 0 || target >= list.length) return;
+            const [item] = list.splice(idx, 1);
+            list.splice(target, 0, item);
+            if (pendingDeleteIdx.value !== -1) pendingDeleteIdx.value = -1;
+        };
+
+        const moveCommand = (catIdx, cmdIdx, delta) => {
+            const cmds = categories.value[catIdx] && categories.value[catIdx].commands;
+            if (!cmds) return;
+            const target = cmdIdx + delta;
+            if (target < 0 || target >= cmds.length) return;
+            const [item] = cmds.splice(cmdIdx, 1);
+            cmds.splice(target, 0, item);
         };
 
         const saveMenu = async () => {
@@ -233,7 +290,17 @@ createApp({
                         const cmdName = cmd.name.trim();
                         const desc = cmd.desc.trim();
                         const icon = (cmd.icon || '').trim();
-                        payload[catName][cmdName] = icon ? { desc, icon } : desc;
+                        const prefix = cmd.prefix !== undefined ? (cmd.prefix === ' ' ? '' : cmd.prefix) : undefined;
+
+                        // 构建指令对象
+                        if (icon || prefix !== undefined) {
+                            const cmdObj = { desc };
+                            if (icon) cmdObj.icon = icon;
+                            if (prefix !== undefined) cmdObj.prefix = prefix;
+                            payload[catName][cmdName] = cmdObj;
+                        } else {
+                            payload[catName][cmdName] = desc;
+                        }
                     }
                 }
                 const result = await bridge.apiPost('menu', payload);
@@ -257,6 +324,7 @@ createApp({
             saving,
             uploading,
             message,
+            pendingDeleteIdx,
             previewIcon,
             resolveIcon,
             uploadIcon,
@@ -264,6 +332,8 @@ createApp({
             deleteCategory,
             addCommand,
             deleteCommand,
+            moveCategory,
+            moveCommand,
             saveMenu
         };
     }

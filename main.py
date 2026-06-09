@@ -60,7 +60,7 @@ class MenuParser:
         return '✨'  # 默认图标
 
 
-@register("astrbot_plugin_helpmenu", "gabriel0721", "HTML渲染帮助菜单插件", "4.1.0")
+@register("astrbot_plugin_helpmenu", "gabriel0721", "HTML渲染帮助菜单插件", "1.0.0")
 class HelpMenuPlugin(Star):
     """帮助菜单插件 - 使用 Playwright 本地渲染"""
     
@@ -68,6 +68,7 @@ class HelpMenuPlugin(Star):
         super().__init__(context)
         self.config = config
         self.command_name = config.get('command_name', 'help')
+        self.command_prefix = config.get('command_prefix', '')
         
         # 内存幽灵插件元数据自愈净化：在完全载入后，彻底移除多余同名幽灵，保留唯一的正统卡片
         try:
@@ -255,54 +256,68 @@ class HelpMenuPlugin(Star):
         return icon_path
 
     def _parse_categories(self, event_prefix: str) -> List[Dict[str, Any]]:
-        """实时解析当前 menu.json 并格式化为渲染器所需的数据列表 (拼上激活前缀，支持自定义图标)"""
+        """实时解析当前 menu.json 并格式化为渲染器所需的数据列表 (支持自定义前缀和图标)"""
         menu_data = self._load_menu_data()
         categories = []
-        
+
         for category_name, cmd_map in menu_data.items():
             commands = []
-            
+
             # 1. 解析分类自身的图标
             raw_cat_icon = cmd_map.get("__icon__", "") if isinstance(cmd_map, dict) else ""
             cat_icon = self.resolve_icon_path(raw_cat_icon) if raw_cat_icon else ""
-            
+
             for cmd_name, cmd_info in cmd_map.items():
                 if cmd_name == "__icon__":
                     continue
-                
-                # 自动前缀解耦：生成前缀和指令
-                # 若指令中原先无任何前缀，则自动拼上当前触发此事件的系统前缀
-                cmd_display = cmd_name
-                if not (cmd_display.startswith("~") or cmd_display.startswith("～") or cmd_display.startswith("/")):
-                    cmd_display = f"{event_prefix}{cmd_display}"
-                
+
                 # 兼容旧版本纯描述字符串和新版本对象配置
                 cmd_desc = ""
                 custom_icon_raw = ""
+                custom_prefix = None  # None 表示使用默认逻辑
+
                 if isinstance(cmd_info, dict):
                     cmd_desc = cmd_info.get("desc", "")
                     custom_icon_raw = cmd_info.get("icon", "")
+                    custom_prefix = cmd_info.get("prefix", None)  # 新增：自定义前缀
                 else:
                     cmd_desc = str(cmd_info)
-                
+
+                # 处理前缀逻辑
+                cmd_display = cmd_name
+
+                # 如果指定了 prefix 字段
+                if custom_prefix is not None:
+                    # prefix 为空字符串 = 不要前缀
+                    # prefix 为具体字符 = 使用该前缀
+                    if custom_prefix:
+                        cmd_display = f"{custom_prefix}{cmd_name}"
+                    else:
+                        cmd_display = cmd_name  # 无前缀
+                else:
+                    # 未指定 prefix 字段，使用原有逻辑：
+                    # 若指令中原先无任何前缀，则自动拼上当前触发此事件的系统前缀
+                    if not (cmd_display.startswith("~") or cmd_display.startswith("～") or cmd_display.startswith("/")):
+                        cmd_display = f"{event_prefix}{cmd_display}"
+
                 # 如果提供了自定义图标，解析它；否则，自动匹配 emoji 规则
                 if custom_icon_raw:
                     icon = self.resolve_icon_path(custom_icon_raw)
                 else:
                     icon = MenuParser.auto_match_emoji(cmd_name, cmd_desc)
-                
+
                 commands.append({
                     "cmd": cmd_display,
                     "desc": cmd_desc,
                     "icon": icon
                 })
-            
+
             categories.append({
                 "name": category_name,
                 "icon": cat_icon,
                 "commands": commands
             })
-            
+
         return categories
 
     @filter.command("help")
@@ -311,12 +326,14 @@ class HelpMenuPlugin(Star):
         image_path = None
         try:
             # 动态获得当前消息环境的指令前缀，优先匹配以提供精美展示
-            event_prefix = "~"
-            # 尝试通过 context.config 获取指令前缀（若有的话）
-            try:
-                event_prefix = self.context.config.command_prefix
-            except:
-                pass
+            event_prefix = self.command_prefix  # 优先使用配置的前缀
+
+            # 如果配置为空，尝试从系统获取
+            if not event_prefix:
+                try:
+                    event_prefix = self.context.config.command_prefix
+                except:
+                    event_prefix = "~"  # 最后的默认值
             
             # 解析菜单配置
             categories = self._parse_categories(event_prefix)

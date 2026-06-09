@@ -1,10 +1,14 @@
 name: astrbot_plugin_helpmenu
-display_name: 帮助菜单增强版
-desc: 宽屏图文帮助菜单，支持 Native Page 可视化编辑、分类/指令 Logo 上传和智能 emoji 回退。
-help: 使用 /help 查看图文菜单，使用 /help 分类名 筛选分类；在插件页面中可视化管理分类、指令、描述和 Logo。
-version: v4.2.0
-author: gabriel
+display_name: 帮助菜单
+short_desc: 使用图片展示 AstrBot 指令帮助菜单，支持后台可视化编辑。
+desc: 一个 AstrBot 图文帮助菜单插件，可将 menu.json 中的分类与指令渲染为图片，并提供 Native Page 后台页面用于维护菜单内容、分类 Logo 和指令 Logo。
+help: 发送 /help 查看完整图文菜单；发送 /help 分类名 查看指定分类；管理员可使用 /添加菜单项 和 /删除菜单项 快速维护菜单。
+version: 1.0.0
+author: gabriel0721
 repo: https://github.com/TenmaGabriel0721/astrbot_plugin_helpmenu
+astrbot_version: ">=4.24.0,<5"
+support_platforms:
+  - aiocqhttp
 pages:
   - name: manage
-    title: 帮助菜单可视化管理
+    title: 帮助菜单管理

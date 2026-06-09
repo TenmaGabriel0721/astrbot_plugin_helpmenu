@@ -21,11 +21,14 @@ class HtmlRenderer:
     
     # 默认背景图API
     DEFAULT_BG_API = "http://manyacg.top/setu"
-    
+
+    # 默认字体文件名（相对 fonts/std/）
+    DEFAULT_FONT_FILE = "东京街角的小浪漫.ttf"
+
     def __init__(self, plugin_dir: str):
         """
         初始化渲染器
-        
+
         Args:
             plugin_dir: 插件目录路径
         """
@@ -34,7 +37,11 @@ class HtmlRenderer:
         self.html_dir = self.static_dir / "html"
         self.css_dir = self.static_dir / "css"
         self.images_dir = self.plugin_dir / "images"
-        
+        self.fonts_dir = self.plugin_dir / "fonts"
+
+        # 字体 data URL 缓存：{绝对路径: data_url}
+        self._font_cache: Dict[str, str] = {}
+
         # HTTP会话
         self._session: Optional[aiohttp.ClientSession] = None
     
@@ -203,6 +210,68 @@ class HtmlRenderer:
             return None
         
         return self._encode_image(logo_path)
+
+    def get_font_data_url(self, font_path: Optional[str] = None) -> str:
+        """
+        将字体文件编码为 data URL，用于注入 @font-face。
+
+        查找顺序：
+          1. 显式传入的路径（绝对或相对插件目录）
+          2. fonts/std/<font_path 的文件名>
+          3. fonts/std/DEFAULT_FONT_FILE
+          4. fonts/std/ 下任意 .ttf/.otf/.woff/.woff2
+
+        Args:
+            font_path: 配置中指定的字体文件路径或文件名，可为空
+
+        Returns:
+            data URL 字符串；若无可用字体，返回空字符串（CSS 会回退到系统字体栈）
+        """
+        candidates: List[Path] = []
+        std_dir = self.fonts_dir / "std"
+
+        if font_path:
+            p = Path(font_path)
+            candidates.append(p if p.is_absolute() else self.plugin_dir / p)
+            candidates.append(std_dir / p.name)
+
+        candidates.append(std_dir / self.DEFAULT_FONT_FILE)
+
+        if std_dir.is_dir():
+            for ext in ("*.ttf", "*.otf", "*.woff2", "*.woff"):
+                candidates.extend(sorted(std_dir.glob(ext)))
+
+        seen = set()
+        for cand in candidates:
+            cand = cand.resolve() if cand.exists() else cand
+            key = str(cand)
+            if key in seen:
+                continue
+            seen.add(key)
+            if not cand.is_file():
+                continue
+            cached = self._font_cache.get(key)
+            if cached:
+                return cached
+            try:
+                ext = cand.suffix.lower()
+                mime = {
+                    ".ttf": "font/ttf",
+                    ".otf": "font/otf",
+                    ".woff": "font/woff",
+                    ".woff2": "font/woff2",
+                }.get(ext, "font/ttf")
+                with open(cand, "rb") as f:
+                    encoded = base64.b64encode(f.read()).decode("ascii")
+                data_url = f"data:{mime};base64,{encoded}"
+                self._font_cache[key] = data_url
+                logger.info(f"已加载菜单字体: {cand.name}")
+                return data_url
+            except Exception as e:
+                logger.warning(f"读取字体文件失败 {cand}: {e}")
+
+        logger.warning("未找到可用字体文件，将回退到系统字体栈")
+        return ""
     
     async def prepare_menu_data(
         self,
@@ -252,7 +321,15 @@ class HtmlRenderer:
         # 获取Logo
         logo_path = config.get('logo_path', '')
         logo_url = self.get_logo_base64(logo_path) if logo_path else None
-        
+
+        # 获取字体（动态嵌入到模板的 @font-face）
+        font_choice = (config.get('font_file', '') or '').strip()
+        if font_choice.lower() == 'none':
+            font_data_url = ''
+        else:
+            font_arg = None if not font_choice or font_choice.lower() == 'auto' else font_choice
+            font_data_url = self.get_font_data_url(font_arg)
+
         # 准备数据
         data = {
             'title': config.get('header_title', 'Bot Menu'),
@@ -261,6 +338,7 @@ class HtmlRenderer:
             'theme_color': config.get('theme_color', '#667eea'),
             'background_url': background_url,
             'logo_url': logo_url,
+            'font_data_url': font_data_url,
             'categories': display_cats,
             'blur_radius': config.get('blur_radius', 0),
             'card_opacity': config.get('card_opacity', 10),

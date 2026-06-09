@@ -1,4 +1,10 @@
 {
+  "command_prefix": {
+    "description": "指令前缀",
+    "type": "string",
+    "hint": "显示在菜单中的指令前缀，如 ~ 或 / 或 ！，留空则自动获取系统前缀",
+    "default": ""
+  },
   "command_name": {
     "description": "触发命令",
     "type": "string",
@@ -18,8 +24,8 @@
   "logo_path": {
     "description": "Logo图片路径",
     "type": "string",
-    "hint": "显示在标题旁边的圆形Logo，留空则不显示。支持相对路径如 ./logo.jpg",
-    "default": "./logo.jpg"
+    "hint": "显示在标题旁边的圆形Logo，留空则不显示。支持相对路径如 ./logo.png",
+    "default": "./logo.png"
   },
   "footer_text": {
     "description": "页脚文字",
@@ -61,5 +67,17 @@
     "type": "int",
     "hint": "命令卡片的不透明度(0-100)。数值越低越透明",
     "default": 10
+  },
+  "font_file": {
+    "description": "菜单字体",
+    "type": "string",
+    "hint": "选择渲染菜单使用的字体。auto=自动选用 fonts/std/ 中的默认字体；none=不嵌入字体，回退到系统字体；其它选项对应 fonts/std/ 下的字体文件。若要添加新字体，把字体文件放入 fonts/std/ 目录，并在此处填写文件名（如 myfont.ttf）。",
+    "options": [
+      "auto",
+      "none",
+      "东京街角的小浪漫.ttf",
+      "font.ttf"
+    ],
+    "default": "auto"
   }
 }
