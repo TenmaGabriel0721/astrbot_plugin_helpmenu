@@ -4,6 +4,7 @@ AstrBot 图文帮助菜单插件
 添加 Native Page 可视化菜单面板，实现秒级修改保存即生效
 """
 
+import re
 import os
 import json
 import uuid
@@ -14,7 +15,9 @@ from typing import Dict, Any, List
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.api import logger
+from astrbot.core.star.filter.command import CommandFilter
 from astrbot.core.star.filter.permission import PermissionType
+from astrbot.core.star.star_handler import star_handlers_registry
 from quart import jsonify, request
 
 from .renderer import HtmlRenderer
@@ -67,7 +70,8 @@ class HelpMenuPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
-        self.command_name = config.get('command_name', 'help')
+        self.command_name = (config.get('command_name', 'help') or 'help').strip() or 'help'
+        self.command_aliases = self._parse_command_aliases(config.get('command_aliases', '菜单,帮助'))
         self.command_prefix = config.get('command_prefix', '')
         
         # 内存幽灵插件元数据自愈净化：在完全载入后，彻底移除多余同名幽灵，保留唯一的正统卡片
@@ -136,8 +140,36 @@ class HelpMenuPlugin(Star):
             ["POST"],
             "解析帮助菜单Logo为可预览数据"
         )
-        
+        self._sync_command_filter()
+
         logger.info("帮助菜单插件增强版已加载 (支持 Native Page 可视化编辑 & 无感重载)")
+
+    @staticmethod
+    def _parse_command_aliases(raw_aliases) -> set[str]:
+        """解析配置中的触发别名，支持逗号、中文逗号、分号、竖线和换行分隔。"""
+        if isinstance(raw_aliases, (list, tuple, set)):
+            values = raw_aliases
+        else:
+            values = re.split(r"[,，;；|\n\r]+", str(raw_aliases or ""))
+        return {str(item).strip() for item in values if str(item).strip()}
+
+    def _sync_command_filter(self):
+        """让配置中的触发命令和别名真正同步到 AstrBot 指令过滤器。"""
+        for handler in star_handlers_registry.get_handlers_by_module_name(__name__):
+            if handler.handler_name != "menu_cmd":
+                continue
+            for handler_filter in handler.event_filters:
+                if isinstance(handler_filter, CommandFilter):
+                    handler_filter.command_name = self.command_name
+                    handler_filter.alias = set(self.command_aliases)
+                    handler_filter._original_command_name = self.command_name
+                    handler_filter._cmpl_cmd_names = None
+                    logger.info(
+                        f"帮助菜单触发命令已设置为: {self.command_name}; "
+                        f"别名: {', '.join(sorted(self.command_aliases)) or '无'}"
+                    )
+                    return
+        logger.warning("未找到帮助菜单指令过滤器，无法同步触发命令配置")
 
     def _migrate_legacy_data(self):
         """将旧版本保存在插件目录中的可变数据迁移到 data/plugin_data。"""

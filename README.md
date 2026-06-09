@@ -55,6 +55,8 @@ sudo apt install fonts-noto-cjk fonts-noto-color-emoji
 /help              查看完整帮助菜单
 /help 常用         查看名称包含“常用”的分类
 /help AI           查看名称包含“AI”的分类
+/菜单              使用默认别名查看完整帮助菜单
+/帮助 常用         使用默认别名查看指定分类
 ```
 
 管理员可使用以下指令快速维护菜单：
@@ -151,7 +153,8 @@ data/plugin_data/astrbot_plugin_helpmenu/menu.json
 | 配置项 | 说明 | 默认值 |
 | --- | --- | --- |
 | `command_prefix` | 菜单中展示的指令前缀，留空则自动获取系统前缀 | 空 |
-| `command_name` | 帮助菜单触发命令 | `help` |
+| `command_name` | 帮助菜单主触发命令，修改后重载插件生效 | `help` |
+| `command_aliases` | 帮助菜单触发别名，支持逗号、中文逗号、分号、竖线或换行分隔，修改后重载插件生效 | `菜单,帮助` |
 | `header_title` | 菜单标题 | `月月菜单` |
 | `header_subtitle` | 菜单副标题 | `System Menu` |
 | `logo_path` | 顶部 Logo 路径，留空则不显示 | `./logo.png` |

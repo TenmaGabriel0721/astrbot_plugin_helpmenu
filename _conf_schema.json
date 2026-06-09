@@ -8,8 +8,14 @@
   "command_name": {
     "description": "触发命令",
     "type": "string",
-    "hint": "触发帮助菜单的命令，如 help 或 菜单",
+    "hint": "帮助菜单主触发命令，如 help 或 菜单。修改后请重载插件生效。",
     "default": "help"
+  },
+  "command_aliases": {
+    "description": "触发命令别名",
+    "type": "string",
+    "hint": "额外触发别名，支持逗号、中文逗号、分号、竖线或换行分隔，如 菜单,帮助。修改后请重载插件生效。",
+    "default": "菜单,帮助"
   },
   "header_title": {
     "description": "菜单标题",
