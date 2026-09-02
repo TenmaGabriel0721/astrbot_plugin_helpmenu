@@ -8,8 +8,11 @@ import errno
 import re
 import os
 import json
+import time
 import uuid
+import hashlib
 import base64
+import asyncio
 from pathlib import Path
 from typing import Dict, Any, List
 
@@ -86,6 +89,23 @@ class HelpMenuPlugin(Star):
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.cache_dir.mkdir(exist_ok=True)
         self.icon_dir.mkdir(parents=True, exist_ok=True)
+
+        # 渲染串行锁：避免多张图同时渲染吃满CPU
+        self._render_lock = asyncio.Lock()
+        # 前台防连击标记：用户触发的渲染进行中时拦截重复发送
+        self._foreground_rendering = False
+        # 用户级冷却记录：{user_id: 上次出图时间戳}
+        self._last_render_at: Dict[str, float] = {}
+        # 菜单成品图缓存（背景确定时）：{缓存key: 图片路径}
+        self._image_cache: Dict[str, str] = {}
+        # 菜单预渲染池（背景随机时）：后台提前渲染好整张图，触发时秒发
+        self._menu_pool: List[str] = []
+        self._menu_pool_key: str = ""
+        # 已发送的池图，延后到下次触发时才删除，避免与异步发图产生竞争
+        self._used_pool_images: List[str] = []
+        self._pool_refilling = False
+        self._pool_task = None
+        self._cleanup_stale_cache_files()
         self._migrate_legacy_data()
         self._migrate_legacy_logo_config()
 
@@ -323,6 +343,7 @@ class HelpMenuPlugin(Star):
                 settings = self._load_page_settings()
                 settings["header_logo"] = ""
                 if self._save_page_settings(settings):
+                    self._invalidate_image_cache()
                     return jsonify({"success": True, "path": ""})
                 return jsonify({"success": False, "message": "保存页面设置失败"})
 
@@ -334,6 +355,7 @@ class HelpMenuPlugin(Star):
             settings["header_logo"] = result["path"]
             if not self._save_page_settings(settings):
                 return jsonify({"success": False, "message": "保存页面设置失败"})
+            self._invalidate_image_cache()
             return jsonify({"success": True, "path": result["path"]})
         except Exception as e:
             logger.error(f"保存顶部Logo失败: {e}")
@@ -356,6 +378,7 @@ class HelpMenuPlugin(Star):
 
             success = self._save_menu_data(payload)
             if success:
+                self._invalidate_image_cache()
                 return jsonify({"success": True})
             else:
                 return jsonify({"success": False, "message": "写入 menu.json 失败"})
@@ -504,52 +527,263 @@ class HelpMenuPlugin(Star):
 
         return categories
 
+    def _render_cache_key(self, categories: List[Dict[str, Any]], filter_cat: str, event_prefix: str) -> str:
+        """根据菜单内容与展示配置计算成品图缓存key。任一输入变化即失效。"""
+        payload = {
+            "menu": categories,
+            "filter": filter_cat or "",
+            "prefix": event_prefix,
+            "title": self.config.get('header_title', ''),
+            "subtitle": self.config.get('header_subtitle', ''),
+            "footer": self.config.get('footer_text', ''),
+            "theme": self.config.get('theme_color', ''),
+            "blur": self.config.get('blur_radius', 0),
+            "opacity": self.config.get('card_opacity', 10),
+            "font": self.config.get('font_file', ''),
+            "logo": self._load_page_settings().get("header_logo", ""),
+            # 输出格式参与key：切换 png/jpeg 或调质量后旧缓存自动失效
+            "fmt": self._image_format(),
+            "q": int(self.config.get('image_quality', 90) or 90) if self._image_format() == 'jpeg' else 0,
+            # 单文件本地背景是确定性的，可参与缓存；API/随机目录背景不缓存
+            "bg": (
+                {"single": str(self.config.get('background_image', ''))}
+                if not self.config.get('use_api_background', True)
+                and Path(str(self.config.get('background_image', ''))).suffix
+                else None
+            ),
+        }
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def _invalidate_image_cache(self):
+        """菜单内容或设置变化后，清空成品图缓存与预渲染池。"""
+        for path in self._image_cache.values():
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception as e:
+                logger.warning(f"清理菜单缓存图失败 {path}: {e}")
+        self._image_cache.clear()
+        self._drain_menu_pool()
+
+    def _image_format(self) -> str:
+        """输出图片格式：jpeg 编码更快、体积更小（默认）；png 无损但更慢。"""
+        fmt = str(self.config.get('image_format', 'jpeg') or 'jpeg').lower()
+        return 'png' if fmt == 'png' else 'jpeg'
+
+    def _image_ext(self) -> str:
+        return '.jpg' if self._image_format() == 'jpeg' else '.png'
+
+    def _cleanup_stale_cache_files(self):
+        """清理上次运行残留的池图与成品图缓存（进程重启后内存索引已丢失）。"""
+        try:
+            for prefix in ("pool_", "menu_"):
+                for ext in (".png", ".jpg"):
+                    for path in self.cache_dir.glob(f"{prefix}*{ext}"):
+                        path.unlink(missing_ok=True)
+        except Exception as e:
+            logger.warning(f"清理历史菜单缓存失败: {e}")
+
+    def _cleanup_used_pool_images(self):
+        """删除上一轮已发送完毕的池图（延后清理，避开发图时序竞争）。"""
+        for path in self._used_pool_images:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception as e:
+                logger.warning(f"清理已用池图失败 {path}: {e}")
+        self._used_pool_images.clear()
+
+    def _drain_menu_pool(self):
+        """清空预渲染池（菜单内容变化时，池里的旧图已过期）。"""
+        for path in self._menu_pool:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception as e:
+                logger.warning(f"清理预渲染菜单图失败 {path}: {e}")
+        self._menu_pool.clear()
+        self._menu_pool_key = ""
+
+    async def _render_menu_image(self, categories, filter_cat, output_path=None) -> str:
+        """渲染一张菜单图（串行执行，避免并发渲染抢CPU）。"""
+        async with self._render_lock:
+            render_config = dict(self.config)
+            render_config["header_logo"] = self._load_page_settings().get("header_logo", "")
+            data = await self.renderer.prepare_menu_data(categories, render_config, filter_cat)
+            if filter_cat and not data['categories']:
+                return ""
+            template_content = self.renderer.load_template("menu.html")
+            html_content = self.renderer.render_template(template_content, data)
+            return await self.renderer.render_to_image(
+                html_content,
+                output_path=output_path,
+                image_format=self._image_format(),
+                quality=int(self.config.get('image_quality', 90) or 90),
+            )
+
+    async def _refill_menu_pool(self, cache_key: str, target: int):
+        """后台把预渲染池补足到目标数量。整张菜单图提前渲染好，触发时直接秒发。"""
+        if self._pool_refilling:
+            return
+        self._pool_refilling = True
+        try:
+            while len(self._menu_pool) < target:
+                event_prefix = self._get_event_prefix()
+                categories = self._parse_categories(event_prefix)
+                if not categories:
+                    return
+                # 菜单在补仓期间被改动过，这批已过期，放弃
+                if self._render_cache_key(categories, None, event_prefix) != cache_key:
+                    logger.debug("菜单已变更，放弃本轮预渲染补仓")
+                    return
+                out = self.cache_dir / f"pool_{uuid.uuid4().hex}{self._image_ext()}"
+                try:
+                    path = await self._render_menu_image(categories, None, str(out))
+                except Exception as e:
+                    logger.warning(f"预渲染菜单图失败: {e}")
+                    return
+                if not path:
+                    return
+                # 渲染期间菜单又变了，丢弃这张
+                if self._menu_pool_key and self._menu_pool_key != cache_key:
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+                    return
+                self._menu_pool.append(path)
+                self._menu_pool_key = cache_key
+                logger.debug(f"预渲染菜单图入池（当前{len(self._menu_pool)}张）")
+        finally:
+            self._pool_refilling = False
+
+    def _schedule_menu_pool_refill(self, cache_key: str, target: int):
+        """后台异步补仓预渲染池，不阻塞当前请求。"""
+        if self._pool_task and not self._pool_task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._pool_task = loop.create_task(self._refill_menu_pool(cache_key, target))
+
+    def _get_event_prefix(self) -> str:
+        """获取菜单中展示的指令前缀。"""
+        event_prefix = self.command_prefix
+        if not event_prefix:
+            try:
+                event_prefix = self.context.config.command_prefix
+            except Exception:
+                event_prefix = "~"
+        return event_prefix
+
     @filter.command("help")
     async def menu_cmd(self, event: AstrMessageEvent, message: str = None):
         """生成图文菜单。用法：~help [分类名]"""
-        image_path = None
+        # 用户级冷却检查
+        now = time.monotonic()
+        cooldown = max(0, int(self.config.get('cooldown_seconds', 60) or 0))
         try:
-            # 动态获得当前消息环境的指令前缀，优先匹配以提供精美展示
-            event_prefix = self.command_prefix  # 优先使用配置的前缀
+            user_id = event.get_sender_id() or event.unified_msg_origin
+        except Exception:
+            user_id = event.unified_msg_origin
+        last = self._last_render_at.get(user_id)
+        if cooldown > 0 and last is not None:
+            remain = int(cooldown - (now - last))
+            if remain > 0:
+                yield event.plain_result(f"⏰ 帮助菜单冷却中，请 {remain} 秒后再试")
+                return
 
-            # 如果配置为空，尝试从系统获取
-            if not event_prefix:
-                try:
-                    event_prefix = self.context.config.command_prefix
-                except:
-                    event_prefix = "~"  # 最后的默认值
-            
-            # 解析菜单配置
+        image_path = None
+        keep_image = False
+        try:
+            event_prefix = self._get_event_prefix()
             categories = self._parse_categories(event_prefix)
-            
+
             if not categories:
                 yield event.plain_result("未配置菜单内容。你可以在后台 Dashboard 的指令菜单管理中快捷创建它。")
                 return
-            
+
             # 处理分类筛选
             filter_cat = event.get_extra("helpmenu_message")
             if filter_cat is None:
                 filter_cat = message.strip() if message else None
-            
-            # 准备渲染数据（支持从API获取背景图）
-            render_config = dict(self.config)
-            render_config["header_logo"] = self._load_page_settings().get("header_logo", "")
-            data = await self.renderer.prepare_menu_data(categories, render_config, filter_cat)
-            
-            if filter_cat and not data['categories']:
-                yield event.plain_result(f"未找到分类：{filter_cat}")
+
+            cache_key = self._render_cache_key(categories, filter_cat, event_prefix)
+
+            # 1) 成品图缓存命中（背景确定时）：秒发
+            cached_path = self._image_cache.get(cache_key)
+            if cached_path and os.path.exists(cached_path):
+                self._last_render_at[user_id] = time.monotonic()
+                logger.debug("菜单成品图缓存命中，直接发送")
+                yield event.image_result(cached_path)
                 return
-            
-            # 加载并渲染模板
-            template_content = self.renderer.load_template("menu.html")
-            html_content = self.renderer.render_template(template_content, data)
-            
-            # 使用 Playwright 渲染为图片
-            image_path = await self.renderer.render_to_image(html_content)
-            
-            # 返回图片
+
+            # 2) 预渲染池命中（无分类筛选的完整菜单）：秒发、后台补仓
+            pool_size = max(0, int(self.config.get('menu_pool_size', 1) or 0))
+            use_pool = not filter_cat and pool_size > 0
+            if use_pool:
+                if self._menu_pool_key and self._menu_pool_key != cache_key:
+                    self._drain_menu_pool()  # 菜单已变更，旧图作废
+                while self._menu_pool:
+                    candidate = self._menu_pool.pop(0)
+                    if not os.path.exists(candidate):
+                        continue
+                    # 已用过的池图延后清理：避免在消息真正发出前删掉文件
+                    self._cleanup_used_pool_images()
+                    self._used_pool_images.append(candidate)
+                    self._last_render_at[user_id] = time.monotonic()
+                    self._schedule_menu_pool_refill(cache_key, pool_size)
+                    logger.debug(f"预渲染池命中，秒发（剩余{len(self._menu_pool)}张）")
+                    yield event.image_result(candidate)
+                    return
+
+            # 3) 池空/带筛选：现场渲染。此时才需要防连击拦截
+            if self._foreground_rendering:
+                yield event.plain_result("⏳ 帮助菜单正在生成中，请勿重复发送")
+                return
+
+            self._foreground_rendering = True
+            try:
+                image_path = await self._render_menu_image(categories, filter_cat)
+                if not image_path:
+                    yield event.plain_result(f"未找到分类：{filter_cat}")
+                    return
+            finally:
+                self._foreground_rendering = False
+
+            # 背景确定（本地单图）时缓存成品图，后续命中秒发
+            if self._is_bg_deterministic():
+                cached_file = self.cache_dir / f"menu_{cache_key[:16]}{self._image_ext()}"
+                try:
+                    os.replace(image_path, cached_file)
+                    image_path = str(cached_file)
+                    self._image_cache[cache_key] = str(cached_file)
+                    while len(self._image_cache) > 8:
+                        oldest_key = next(iter(self._image_cache))
+                        oldest_path = self._image_cache.pop(oldest_key)
+                        if oldest_path != image_path and os.path.exists(oldest_path):
+                            try:
+                                os.remove(oldest_path)
+                            except OSError:
+                                pass
+                    keep_image = True
+                except OSError as e:
+                    logger.warning(f"保存菜单缓存图失败: {e}")
+
+            # 记录冷却起点并预热池，让下一次触发能秒发
+            self._last_render_at[user_id] = time.monotonic()
+            if len(self._last_render_at) > 512:
+                cutoff = time.monotonic() - cooldown - 60
+                self._last_render_at = {
+                    uid: ts for uid, ts in self._last_render_at.items() if ts > cutoff
+                }
+            if use_pool:
+                self._schedule_menu_pool_refill(cache_key, pool_size)
+
             yield event.image_result(image_path)
-            
+
         except FileNotFoundError as e:
             logger.error(f"模板文件不存在: {e}")
             yield event.plain_result("❌ 菜单模板文件不存在，请检查插件安装是否完整")
@@ -557,13 +791,20 @@ class HelpMenuPlugin(Star):
             logger.exception(f"生成菜单失败: {e}")
             yield event.plain_result(f"❌ 生成菜单出错: {str(e)}")
         finally:
-            # 清理临时图片文件
-            if image_path and os.path.exists(image_path):
+            # 清理临时图片（缓存图与池图保留复用）
+            if image_path and not keep_image and os.path.exists(image_path):
                 try:
                     os.remove(image_path)
                     logger.debug(f"已清理临时图片文件: {image_path}")
                 except Exception as e:
                     logger.warning(f"清理临时图片文件失败: {e}")
+
+    def _is_bg_deterministic(self) -> bool:
+        """背景是否确定（本地单张图片）。随机背景不参与成品图缓存。"""
+        if self.config.get('use_api_background', True):
+            return False
+        bg = str(self.config.get('background_image', '') or '')
+        return bool(Path(bg).suffix)
     
     @filter.permission_type(PermissionType.ADMIN)
     @filter.command("添加菜单项")
@@ -582,6 +823,7 @@ class HelpMenuPlugin(Star):
 
         menu_data[category][clean_cmd] = description
         if self._save_menu_data(menu_data):
+            self._invalidate_image_cache()
             yield event.plain_result(f"🎉 成功添加菜单项并保存：{category} :: {command} :: {description}。即时生效！")
         else:
             yield event.plain_result("❌ 写入配置失败，请检查文件权限。")
@@ -606,13 +848,40 @@ class HelpMenuPlugin(Star):
 
         if found:
             if self._save_menu_data(menu_data):
+                self._invalidate_image_cache()
                 yield event.plain_result(f"🎉 成功删除菜单项 '{command_to_delete}'。即时生效！")
             else:
                 yield event.plain_result("❌ 写入配置失败，请检查文件权限。")
         else:
             yield event.plain_result(f"未找到指令名为 '{command_to_delete}' 的菜单项。")
             
+    @filter.on_astrbot_loaded()
+    async def prewarm_menu_pool(self):
+        """框架加载完成后预热：后台先渲染好菜单图，让首次触发也能秒发。"""
+        pool_size = max(0, int(self.config.get('menu_pool_size', 1) or 0))
+        if pool_size <= 0:
+            return
+        try:
+            event_prefix = self._get_event_prefix()
+            categories = self._parse_categories(event_prefix)
+            if not categories:
+                return
+            cache_key = self._render_cache_key(categories, None, event_prefix)
+            self._schedule_menu_pool_refill(cache_key, pool_size)
+            logger.info("帮助菜单预渲染池预热已启动")
+        except Exception as e:
+            logger.warning(f"帮助菜单预热失败: {e}")
+
     async def terminate(self):
         """插件卸载时清理资源"""
+        if self._pool_task and not self._pool_task.done():
+            self._pool_task.cancel()
+            try:
+                await self._pool_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._pool_task = None
+        self._drain_menu_pool()
+        self._cleanup_used_pool_images()
         await self.renderer.close()
         logger.info("帮助菜单插件已卸载")

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ title }}</title>
     <style>
-@import url('https://fonts.googleapis.com/css2?family=Noto+Color+Emoji&display=swap');
+/* 系统已安装 Noto Color Emoji，无需远程加载 Google Fonts（避免网络阻塞渲染） */
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -20,6 +20,12 @@
     font-style: normal;
 }
 {% endif %}
+html {
+    /* 让绝对定位的背景层能按文档实际高度铺满 */
+    position: relative;
+    min-height: 100%;
+}
+
 body {
     font-family: 'TokyoRomance', 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji', 'Android Emoji', 'EmojiSymbols', 'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', Arial, sans-serif;
     min-height: 100vh;
@@ -28,14 +34,17 @@ body {
     position: relative;
 }
 
-/* 背景图片 */
+/* 背景图片 - 用 absolute 铺满整个文档高度。
+   fixed 只跟随 viewport，长图截图时会导致下半部分没有背景 */
 .background {
-    position: fixed;
+    position: absolute;
     top: 0;
     left: 0;
     width: 100%;
     height: 100%;
+    min-height: 100vh;
     z-index: 0;
+    overflow: hidden;
 }
 
 .background img {
@@ -46,11 +55,12 @@ body {
 
 /* 背景遮罩 - 降低透明度让背景图更清晰 */
 .background-overlay {
-    position: fixed;
+    position: absolute;
     top: 0;
     left: 0;
     width: 100%;
     height: 100%;
+    min-height: 100vh;
     background: linear-gradient(135deg, rgba(26, 26, 46, 0.6) 0%, rgba(22, 33, 62, 0.5) 100%);
     z-index: 1;
 }
