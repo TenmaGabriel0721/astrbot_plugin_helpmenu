@@ -41,7 +41,7 @@
   "use_api_background": {
     "description": "使用API获取背景图",
     "type": "bool",
-    "hint": "开启后将从API获取随机二次元背景图，关闭则使用本地图片",
+    "hint": "开启后后台自动从API预取背景图缓存到本地，触发时直接使用（随机取用、用完即删、后台自动补仓），全程零网络等待；关闭则使用本地图片",
     "default": true
   },
   "background_api": {
@@ -49,6 +49,37 @@
     "type": "string",
     "hint": "返回图片的API地址，留空使用默认API",
     "default": "http://manyacg.top/setu"
+  },
+  "menu_pool_size": {
+    "description": "菜单预渲染池大小",
+    "type": "int",
+    "hint": "后台提前渲染好的完整菜单图数量(0-3)。触发时直接秒发、用完即删、后台自动补仓，背景依然每次随机。0=关闭预渲染（每次现场生成，需等待数秒）。",
+    "default": 1
+  },
+  "bg_pool_size": {
+    "description": "背景预取池大小",
+    "type": "int",
+    "hint": "后台预缓存的API背景图数量(1-5)。每用掉一张即随机换新，后台自动补足。无需等待网络。",
+    "default": 2
+  },
+  "cooldown_seconds": {
+    "description": "用户触发冷却(秒)",
+    "type": "int",
+    "hint": "同一用户两次触发帮助菜单的最小间隔(0-3600秒)，0表示不限制。冷却期内再次触发会提示剩余秒数。",
+    "default": 60
+  },
+  "image_format": {
+    "description": "菜单图片格式",
+    "type": "string",
+    "hint": "jpeg 编码速度约为 png 的 1.8 倍、体积约为一半（长菜单实测 3.1s/1.45MB → 1.8s/0.84MB），肉眼几乎无差别，默认推荐。png 为无损，纯色/文字边缘更锐利但更慢、更占空间。",
+    "options": ["jpeg", "png"],
+    "default": "jpeg"
+  },
+  "image_quality": {
+    "description": "JPEG 质量",
+    "type": "int",
+    "hint": "1-100，仅在图片格式为 jpeg 时生效。90 为清晰度与体积的平衡点，低于 80 会出现可见压缩痕迹。",
+    "default": 90
   },
   "background_image": {
     "description": "本地背景图片路径",

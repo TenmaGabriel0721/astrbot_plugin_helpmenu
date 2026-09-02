@@ -8,6 +8,7 @@ import os
 import base64
 import random
 import tempfile
+import uuid
 import aiohttp
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -42,7 +43,13 @@ class HtmlRenderer:
         self.data_images_dir = self.data_dir / "images"
         self.fonts_dir = self.plugin_dir / "fonts"
 
-        # 字体 data URL 缓存：{绝对路径: data_url}
+        # 背景图预取池：提前从API拉图缓存到本地，渲染时随机取用、用完即删
+        self.bg_pool_dir = self.data_dir / "cache" / "bg_pool"
+        self.bg_pool_dir.mkdir(parents=True, exist_ok=True)
+        self._bg_refilling = False
+        self._bg_refill_task: Optional[asyncio.Task] = None
+
+        # 字体 file:// URL 缓存：{绝对路径: file_url}
         self._font_cache: Dict[str, str] = {}
 
         # HTTP会话
@@ -59,7 +66,14 @@ class HtmlRenderer:
         return self._session
     
     async def close(self):
-        """关闭HTTP会话和浏览器资源"""
+        """关闭HTTP会话、后台补仓任务和浏览器资源"""
+        if self._bg_refill_task and not self._bg_refill_task.done():
+            self._bg_refill_task.cancel()
+            try:
+                await self._bg_refill_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._bg_refill_task = None
         if self._session and not self._session.closed:
             await self._session.close()
         if self._browser:
@@ -133,49 +147,111 @@ class HtmlRenderer:
         with open(template_path, 'r', encoding='utf-8') as f:
             return f.read()
     
-    async def get_background_from_api(self, api_url: str = None) -> Optional[str]:
-        """
-        从API获取背景图片
-        
-        Args:
-            api_url: API地址，为空则使用默认API
-        
-        Returns:
-            base64编码的图片数据URL，或None
-        """
-        if not api_url:
-            api_url = self.DEFAULT_BG_API
-        
+    async def _download_bg_to_pool(self, api_url: str) -> bool:
+        """从API下载一张背景图存入本地预取池。"""
         try:
             session = await self._get_session()
             async with session.get(api_url) as response:
                 response.raise_for_status()
                 content = await response.read()
-                
-                # 根据Content-Type确定MIME类型
-                content_type = response.headers.get('Content-Type', 'image/jpeg')
-                if 'jpeg' in content_type or 'jpg' in content_type:
-                    mime_type = 'image/jpeg'
-                elif 'png' in content_type:
-                    mime_type = 'image/png'
+
+                content_type = response.headers.get('Content-Type', '')
+                if 'png' in content_type:
+                    ext = '.png'
                 elif 'webp' in content_type:
-                    mime_type = 'image/webp'
+                    ext = '.webp'
                 elif 'gif' in content_type:
-                    mime_type = 'image/gif'
+                    ext = '.gif'
                 else:
-                    mime_type = 'image/jpeg'
-                
-                encoded = base64.b64encode(content).decode('utf-8')
-                logger.info(f"从API获取背景图成功: {api_url}")
-                return f"data:{mime_type};base64,{encoded}"
-                
-        except aiohttp.ClientError as e:
-            logger.error(f"从API获取背景图失败: {e}")
-            return None
+                    ext = '.jpg'
+
+                if len(content) < 1024:  # 过小的响应视为无效
+                    logger.warning(f"背景API返回内容过小({len(content)}B)，跳过: {api_url}")
+                    return False
+
+                pool_file = self.bg_pool_dir / f"bg_{uuid.uuid4().hex}{ext}"
+                with open(pool_file, "wb") as f:
+                    f.write(content)
+                logger.debug(f"背景图已预取到池: {pool_file.name} ({len(content)//1024}KB)")
+                return True
         except Exception as e:
-            logger.error(f"获取背景图时出错: {e}")
-            return None
-    
+            logger.warning(f"预取背景图失败: {e}")
+            return False
+
+    def _bg_pool_files(self) -> List[Path]:
+        """列出当前背景池中的图片文件。"""
+        try:
+            return [
+                path for path in self.bg_pool_dir.iterdir()
+                if path.is_file() and path.suffix.lower() in {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
+            ]
+        except Exception:
+            return []
+
+    async def refill_bg_pool(self, api_url: str, target_size: int = 2):
+        """将背景池补足到目标数量（带防重入，可被并发安全地反复调用）。"""
+        if self._bg_refilling:
+            return
+        self._bg_refilling = True
+        try:
+            while len(self._bg_pool_files()) < target_size:
+                if not await self._download_bg_to_pool(api_url):
+                    break  # API不可用，等待下次再补
+        finally:
+            self._bg_refilling = False
+
+    def _schedule_bg_refill(self, api_url: str, target_size: int = 2):
+        """后台异步补仓，不阻塞当前渲染。"""
+        if self._bg_refill_task and not self._bg_refill_task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._bg_refill_task = loop.create_task(self.refill_bg_pool(api_url, target_size))
+
+    def acquire_background(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """取一张背景图：优先消费本地预取池（随机取用、用完即删），池空回退本地图片。
+
+        Returns:
+            {"url": data_url或None, "cacheable": 背景是否确定（决定菜单成品图能否缓存）}
+        """
+        use_api = config.get('use_api_background', True)
+
+        if use_api:
+            api_url = config.get('background_api', '') or self.DEFAULT_BG_API
+            pool_size = max(1, int(config.get('bg_pool_size', 2) or 2))
+            # 池不足时后台补仓（含插件刚启动的首次预热）
+            self._schedule_bg_refill(api_url, pool_size)
+
+            pool_files = self._bg_pool_files()
+            if pool_files:
+                selected = random.choice(pool_files)
+                encoded = self._encode_image(str(selected))
+                if encoded:
+                    try:
+                        selected.unlink()  # 用完即删，保证下次背景不重复
+                    except OSError as e:
+                        logger.warning(f"删除已用背景图失败 {selected}: {e}")
+                    logger.info(f"从预取池取用背景图: {selected.name}（剩余{len(pool_files)-1}张）")
+                    return {"url": encoded, "cacheable": False}
+                # 编码失败（文件损坏等）也删除该文件，避免反复选中坏图
+                try:
+                    selected.unlink()
+                except OSError:
+                    pass
+                logger.warning(f"预取池背景图编码失败，已丢弃: {selected.name}")
+
+            logger.warning("背景预取池为空，回退到本地图片")
+
+        # 本地背景（单文件=确定性可缓存；目录随机=不可缓存）
+        bg_path = config.get('background_image', './images')
+        resolved = self._resolve_resource_path(bg_path, allow_plugin_fallback=True)
+        if resolved and resolved.is_file():
+            return {"url": self._encode_image(str(resolved)), "cacheable": True}
+        url = self.get_random_background(bg_path)
+        return {"url": url, "cacheable": False}
+
     def get_random_background(self, bg_path: str = None) -> Optional[str]:
         """
         获取随机本地背景图片的base64编码
@@ -277,7 +353,10 @@ class HtmlRenderer:
 
     def get_font_data_url(self, font_path: Optional[str] = None) -> str:
         """
-        将字体文件编码为 data URL，用于注入 @font-face。
+        解析字体文件并返回 file:// 本地直链，用于注入 @font-face。
+
+        相比把数MB的字体转成Base64塞进HTML，file:// 直链让 Chromium 直接读本地文件，
+        解析速度提升数倍。页面本身即通过 file:// 加载，同源可访问。
 
         查找顺序：
           1. 显式传入的路径（绝对或相对插件目录）
@@ -289,7 +368,7 @@ class HtmlRenderer:
             font_path: 配置中指定的字体文件路径或文件名，可为空
 
         Returns:
-            data URL 字符串；若无可用字体，返回空字符串（CSS 会回退到系统字体栈）
+            file:// URL 字符串；若无可用字体，返回空字符串（CSS 会回退到系统字体栈）
         """
         candidates: List[Path] = []
         std_dir = self.fonts_dir / "std"
@@ -307,8 +386,7 @@ class HtmlRenderer:
 
         seen = set()
         for cand in candidates:
-            cand = cand.resolve() if cand.exists() else cand
-            key = str(cand)
+            key = str(cand.resolve() if cand.exists() else cand)
             if key in seen:
                 continue
             seen.add(key)
@@ -318,21 +396,12 @@ class HtmlRenderer:
             if cached:
                 return cached
             try:
-                ext = cand.suffix.lower()
-                mime = {
-                    ".ttf": "font/ttf",
-                    ".otf": "font/otf",
-                    ".woff": "font/woff",
-                    ".woff2": "font/woff2",
-                }.get(ext, "font/ttf")
-                with open(cand, "rb") as f:
-                    encoded = base64.b64encode(f.read()).decode("ascii")
-                data_url = f"data:{mime};base64,{encoded}"
-                self._font_cache[key] = data_url
-                logger.info(f"已加载菜单字体: {cand.name}")
-                return data_url
+                font_url = f"file://{pathname2url(str(cand.resolve()))}"
+                self._font_cache[key] = font_url
+                logger.info(f"已加载菜单字体(file://直链): {cand.name}")
+                return font_url
             except Exception as e:
-                logger.warning(f"读取字体文件失败 {cand}: {e}")
+                logger.warning(f"解析字体文件路径失败 {cand}: {e}")
 
         logger.warning("未找到可用字体文件，将回退到系统字体栈")
         return ""
@@ -363,25 +432,13 @@ class HtmlRenderer:
         else:
             display_cats = categories
         
-        # 获取背景图
-        background_url = None
-        use_api = config.get('use_api_background', True)
+        # 获取背景图：优先消费本地预取池（后台异步补仓，无网络等待）
+        bg = self.acquire_background(config)
+        background_url = bg["url"]
+        bg_cacheable = bg["cacheable"]
         
-        if use_api:
-            # 从API获取背景图
-            api_url = config.get('background_api', '') or self.DEFAULT_BG_API
-            background_url = await self.get_background_from_api(api_url)
+        # 获取Logo
             
-            # 如果API失败，回退到本地图片
-            if not background_url:
-                logger.warning("API获取背景图失败，回退到本地图片")
-                bg_path = config.get('background_image', './images')
-                background_url = self.get_random_background(bg_path)
-        else:
-            # 使用本地图片
-            bg_path = config.get('background_image', './images')
-            background_url = self.get_random_background(bg_path)
-        
         # 获取Logo
         logo_path = config.get('header_logo', '')
         logo_url = self.get_logo_base64(logo_path) if logo_path else None
@@ -406,6 +463,7 @@ class HtmlRenderer:
             'categories': display_cats,
             'blur_radius': config.get('blur_radius', 0),
             'card_opacity': config.get('card_opacity', 10),
+            'bg_cacheable': bg_cacheable,
         }
         
         return data
@@ -425,18 +483,30 @@ class HtmlRenderer:
         template = Template(template_content)
         return template.render(**data)
     
-    async def render_to_image(self, html_content: str, output_path: str = None, scale: float = 2.0) -> str:
+    async def render_to_image(
+        self,
+        html_content: str,
+        output_path: str = None,
+        scale: float = 2.0,
+        image_format: str = 'png',
+        quality: int = 90,
+    ) -> str:
         """
         使用 Playwright 将 HTML 渲染为图片
-        
+
         Args:
             html_content: HTML内容
             output_path: 输出路径，如果为None则自动生成
             scale: 缩放比例，默认2.0以提高清晰度
-        
+            image_format: 输出格式，'png' 或 'jpeg'（jpeg 编码更快、体积更小）
+            quality: JPEG 质量(1-100)，仅在 image_format='jpeg' 时生效
+
         Returns:
             图片文件路径
         """
+        image_type = 'jpeg' if str(image_format).lower() in ('jpg', 'jpeg') else 'png'
+        quality = min(100, max(1, int(quality or 90)))
+
         temp_html_path = None
         context = None
         try:
@@ -446,7 +516,8 @@ class HtmlRenderer:
                 f.write(html_content)
 
             if output_path is None:
-                output_path = temp_html_path.replace('.html', '.png')
+                ext = '.jpg' if image_type == 'jpeg' else '.png'
+                output_path = temp_html_path.replace('.html', ext)
 
             browser = await self._get_browser()
             # 创建带有设备缩放的上下文，提高清晰度
@@ -456,51 +527,56 @@ class HtmlRenderer:
             )
             page = await context.new_page()
 
-            # 加载HTML文件
+            # 加载HTML文件。用 load 替代 networkidle（页面资源均为本地/data URL，
+            # networkidle 只会白等固定超时）；字体与图片就绪单独显式等待。
             file_url = f"file://{pathname2url(temp_html_path)}"
-            await page.goto(file_url, wait_until='networkidle')
-            await page.wait_for_timeout(500)  # 等待渲染完成
+            await page.goto(file_url, wait_until='load')
+            await page.evaluate(
+                "async () => {"
+                "  if (document.fonts && document.fonts.ready) await document.fonts.ready;"
+                "  const imgs = Array.from(document.images);"
+                "  await Promise.all(imgs.map(img => img.complete ? null :"
+                "    new Promise(res => { img.onload = img.onerror = res; })));"
+                "}"
+            )
 
-            # 获取容器元素
-            container = await page.query_selector('.container')
-            if not container:
-                # 如果没有container，截取整个页面
-                await page.screenshot(path=output_path, full_page=True, type='png')
+            # 背景层是 .container 的兄弟节点，对 .container 做元素截图会把背景排除在外，
+            # 所以必须先把 viewport 撑到内容高度（背景层按文档高度铺满），再按坐标裁剪。
+            rect_js = (
+                "() => { const c = document.querySelector('.container');"
+                "  if (!c) return null;"
+                "  const r = c.getBoundingClientRect();"
+                "  return {x: r.left + window.scrollX, y: r.top + window.scrollY,"
+                "          w: r.width, h: r.height}; }"
+            )
+            box = await page.evaluate(rect_js)
+            if box:
+                await page.set_viewport_size({
+                    'width': max(int(box['w']) + 48, 1360),
+                    'height': max(int(box['h']) + 48, 800),
+                })
+                # viewport 变化后等两帧重排，背景层才会按新高度铺满
+                await page.evaluate(
+                    "() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))"
+                )
+                box = await page.evaluate(rect_js) or box
+
+            screenshot_kwargs = {'path': output_path, 'type': image_type}
+            if box:
+                screenshot_kwargs['full_page'] = False
+                screenshot_kwargs['clip'] = {
+                    'x': max(0, box['x'] - 12),
+                    'y': max(0, box['y'] - 12),
+                    'width': box['w'] + 24,
+                    'height': box['h'] + 24,
+                }
             else:
-                # 获取容器的边界框
-                box = await container.bounding_box()
-                if box:
-                    # 设置viewport以匹配内容
-                    viewport_width = int(box['width']) + 48
-                    viewport_height = int(box['height']) + 48
-                    await page.set_viewport_size({
-                        'width': max(viewport_width, 1360),
-                        'height': max(viewport_height, 800)
-                    })
+                screenshot_kwargs['full_page'] = True
+            if image_type == 'jpeg':
+                screenshot_kwargs['quality'] = quality
+            await page.screenshot(**screenshot_kwargs)
 
-                    # 重新获取边界框（viewport改变后可能变化）
-                    await page.wait_for_timeout(200)
-                    box = await container.bounding_box()
-
-                    if box:
-                        # 截取容器区域
-                        await page.screenshot(
-                            path=output_path,
-                            full_page=False,
-                            type='png',
-                            clip={
-                                'x': max(0, box['x'] - 12),
-                                'y': max(0, box['y'] - 12),
-                                'width': box['width'] + 24,
-                                'height': box['height'] + 24
-                            }
-                        )
-                    else:
-                        await page.screenshot(path=output_path, full_page=True, type='png')
-                else:
-                    await page.screenshot(path=output_path, full_page=True, type='png')
-
-            logger.info(f"菜单图片已生成: {output_path} (scale={scale}x)")
+            logger.info(f"菜单图片已生成: {output_path} (scale={scale}x, {image_type})")
             return output_path
                     
         except Exception as e:

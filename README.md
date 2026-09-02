@@ -162,10 +162,21 @@ data/plugin_data/astrbot_plugin_helpmenu/menu.json
 | `theme_color` | 菜单主题色 | `#667eea` |
 | `use_api_background` | 是否使用 API 获取背景图 | `true` |
 | `background_api` | 背景图 API 地址 | `http://manyacg.top/setu` |
+| `menu_pool_size` | 菜单预渲染池大小，后台提前渲染好整张菜单图，触发时秒发；0 表示关闭预渲染 | `1` |
+| `bg_pool_size` | 背景图预取池大小，提前从 API 缓存背景图到本地，用完即删 | `2` |
+| `cooldown_seconds` | 同一用户两次触发的最小间隔（秒），0 表示不限制 | `60` |
+| `image_format` | 菜单图片格式，`jpeg` 编码更快、体积更小；`png` 无损但更慢 | `jpeg` |
+| `image_quality` | JPEG 质量（1-100），仅 `image_format` 为 `jpeg` 时生效 | `90` |
 | `background_image` | 本地背景图片或图片目录 | `./images` |
 | `blur_radius` | 背景虚化程度 | `0` |
 | `card_opacity` | 指令卡片透明度 | `10` |
 | `font_file` | 菜单字体文件 | `auto` |
+
+### 关于出图速度
+
+插件默认启用**预渲染池**：后台提前把整张菜单图渲染好，用户触发时直接发送已经准备好的图片，等待时间为 0；发送后该图立即删除并在后台补仓，因此每次的随机背景依然不同。
+
+若不希望有后台渲染开销，可把 `menu_pool_size` 设为 `0`，恢复为每次现场生成（需等待数秒）。
 
 ## 文件说明
 
